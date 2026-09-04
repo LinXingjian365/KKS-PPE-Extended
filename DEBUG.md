@@ -122,6 +122,15 @@ All issues encountered during development, their root causes, and fixes. This do
 - `bu.press_key` does not support "Control+v" combo format — use individual key calls or avoid paste.
 - `bu.upload_file` requires CSS selector for file input element.
 
+### 20. VideoExport recording fails — "Error while generating the video"
+**Symptom**: CharaStudio built-in video recording (VideoExport plugin) shows "Error while generating the video, please check your output_log.txt file." BepInEx log shows `ffmpeg failed during the main encode pass (exit code -40)` and `h264_nvenc: Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height.`
+**Root Cause**: VideoExport uses `h264_nvenc` (NVIDIA hardware encoding) with parameters `-tune hq -preset slow -qp 16`. On older NVIDIA drivers (e.g., 531.41), the nvenc encoder rejects these parameters and fails to initialize.
+**Fix**: 
+- **Option A (recommended)**: Update NVIDIA driver to latest version. After driver update, nvenc works correctly with the same parameters.
+- **Option B (fallback)**: Set `mp4HwAccel = false` in `BepInEx/config/com.joan6694.illusionplugins.videoexport.cfg` to use `libx264` (CPU encoding, 100% compatible, better quality, slower).
+- Config location: `BepInEx/config/com.joan6694.illusionplugins.videoexport.cfg`, key `mp4HwAccel`.
+- **Note**: If the game is running, BepInEx may overwrite config changes on exit. Close CharaStudio before editing the config.
+
 ---
 
 ## Environment Reference
@@ -149,3 +158,4 @@ If something breaks:
 3. **DLL won't update** → Close CharaStudio first, then `cmd /c copy`.
 4. **DLSS not working** → Verify ReShade is Add-on build, `renodx-dlss.addon64` in `addons/`, only `dxgi.dll` proxy.
 5. **Console spam** → "Screen position out of view frustum" is harmless, ignore or filter.
+6. **Video recording fails** → Update NVIDIA driver, or set `mp4HwAccel = false` in VideoExport config (see issue #20).
