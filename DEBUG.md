@@ -6,6 +6,10 @@ All issues encountered during development, their root causes, and fixes. This do
 
 ## PPE_Extended Plugin Issues
 
+### 24. Unified panel architecture
+
+The original KKS PPE plugin remains the runtime owner of PPSv2 resources and initialization. Unified Panel Mode only suppresses its duplicate IMGUI and lets PPE Extended write the standard Unity 2019.4 PPSv2 settings. KKS-specific extras that have no PPSv2 equivalent remain part of the original runtime rather than being reimplemented with incompatible shaders.
+
 ### 23. Original PPE and PPE Extended fought over the same settings
 
 Both plugins operate on the same PPSv2 profile and camera layer. The old extension wrote effect `enabled` values every frame, so an extension default of `false` could silently disable an effect selected in the original panel.

@@ -32,6 +32,8 @@ Extends the original KKS PostProcessingEffects plugin with a standalone floating
 - **Color Overrides master switch (default OFF)**: Curves/Mixer/CustomTone do NOT touch PPE panel values until explicitly enabled. This prevents the extension from fighting with your existing PPE settings.
 - **Compatibility mode is default**: the original KKS PPE owns effect enable states and values. The extension does not write them unless **Take Ownership of PPSv2 Effects** is enabled.
 - Camera AA/Fog are similarly untouched unless **Take Ownership of Camera AA/Fog** is enabled.
+- **Unified Panel Mode** hides the duplicate original PPE IMGUI while keeping the original PPE runtime initialization and Unity 2019.4 PPSv2 resources.
+- KKS-specific extras remain implemented by the original PPE runtime; standard Unity 2019.4 PPSv2 effects are controlled from the unified tabs.
 - **Pure English UI** — no translated strings.
 - **Standalone floating window** (Ctrl+P) — does not modify the original PPE panel layout.
 - **Panel scale slider** (0.5x–2x) for HiDPI displays.

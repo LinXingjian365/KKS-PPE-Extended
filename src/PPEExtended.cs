@@ -8,7 +8,7 @@ using UnityEngine.Rendering.PostProcessing;
 
 namespace PPE_Extended
 {
-    [BepInPlugin("com.user.ppe_extended", "PPE Extended (Full PPSv2)", "2.0.3")]
+    [BepInPlugin("com.user.ppe_extended", "PPE Extended (Full PPSv2)", "2.0.4")]
     [BepInDependency("org.bepinex.plugins.KKS_PostProcessingEffectsV3")]
     public class PPEExtended : BaseUnityPlugin
     {
@@ -115,6 +115,7 @@ namespace PPE_Extended
         public static ConfigEntry<bool> EnableColorOverrides;
         public static ConfigEntry<bool> EnableEffectOverrides;
         public static ConfigEntry<bool> EnableCameraOverrides;
+        public static ConfigEntry<bool> UnifiedPanelMode;
 
         // UI
         public static ConfigEntry<float> UIScale;
@@ -259,6 +260,7 @@ namespace PPE_Extended
             EnableColorOverrides = CfgB("General", "EnableColorOverrides", false);
             EnableEffectOverrides = CfgB("General", "EnableEffectOverrides", false);
             EnableCameraOverrides = CfgB("General", "EnableCameraOverrides", false);
+            UnifiedPanelMode = CfgB("General", "UnifiedPanelMode", false);
 
             _ppeType = AccessTools.TypeByName("PostProcessingEffectsV3.PostProcessingEffectsV3");
             if (_ppeType == null) { Logger.LogError("PPE type not found"); return; }
@@ -272,6 +274,8 @@ namespace PPE_Extended
             _harmony = new Harmony("com.user.ppe_extended");
             var upd = AccessTools.Method(_ppeType, "Update");
             if (upd != null) _harmony.Patch(upd, postfix: new HarmonyMethod(typeof(PPEExtended), nameof(UpdatePostfix)));
+            var originalGui = AccessTools.Method(_ppeType, "OnGUI");
+            if (originalGui != null) _harmony.Patch(originalGui, prefix: new HarmonyMethod(typeof(PPEExtended), nameof(OriginalOnGUIPrefix)));
 
             // Detect render path (logging only, does not disable anything)
             try
@@ -303,7 +307,7 @@ namespace PPE_Extended
             if (!_showWindow) return;
             float s = UIScale.Value;
             GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(s, s, 1f));
-            _windowRect = GUILayout.Window(_windowId, _windowRect, DrawWindow, "PPE Full PPSv2 Color Panel v2.0.3  [Ctrl+P]", GUILayout.Width(360));
+            _windowRect = GUILayout.Window(_windowId, _windowRect, DrawWindow, "PPE Full PPSv2 Color Panel v2.0.4  [Ctrl+P]", GUILayout.Width(360));
             GUI.matrix = Matrix4x4.identity;
         }
 
@@ -330,6 +334,15 @@ namespace PPE_Extended
                 GUILayout.Label("Compatibility mode - original PPE effect toggles are untouched", GUILayout.Width(340));
             bool cam = GUILayout.Toggle(EnableCameraOverrides.Value, "  Take Ownership of Camera AA/Fog");
             if (cam != EnableCameraOverrides.Value) EnableCameraOverrides.Value = cam;
+            bool unified = GUILayout.Toggle(UnifiedPanelMode.Value, "  Unified Panel Mode (hide original PPE panel)");
+            if (unified != UnifiedPanelMode.Value) UnifiedPanelMode.Value = unified;
+            if (UnifiedPanelMode.Value)
+            {
+                EnableColorOverrides.Value = true;
+                EnableEffectOverrides.Value = true;
+                EnableCameraOverrides.Value = true;
+                GUILayout.Label("Unified mode: PPE Extended is the single standard PPSv2 controller", GUILayout.Width(340));
+            }
             GUILayout.Space(3);
 
             string[] tabs = { "Trackballs", "Curves", "Mixer", "CustomTone", "Bloom", "DoF", "Grain", "Lens", "CA", "Blur", "Vignette", "SSR", "MSVO", "AutoExp", "AA", "Fog" };
@@ -728,6 +741,13 @@ namespace PPE_Extended
             {
                 Debug.LogWarning("[PPE Ext] UpdatePostfix error: " + e.Message);
             }
+        }
+
+        private static bool OriginalOnGUIPrefix()
+        {
+            // Keep the original PPE renderer/update alive, but suppress only its
+            // duplicate IMGUI when the user explicitly selects unified mode.
+            return !UnifiedPanelMode.Value;
         }
 
         private static bool RefreshBinding(object ppe)

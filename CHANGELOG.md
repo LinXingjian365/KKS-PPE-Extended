@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.0.4 — 2026-09-05
+
+### Added
+- Added opt-in Unified Panel Mode to hide the duplicate original PPE UI while preserving its runtime initialization.
+- Unified mode automatically enables PPE Extended ownership for the standard Unity 2019.4 PPSv2 surface.
+
 ## v2.0.3 — 2026-09-05
 
 ### Fixed
