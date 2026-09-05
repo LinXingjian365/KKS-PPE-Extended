@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.5] - 2026-09-05
+
+- Fixed stale PPSv2 override states persisting after the master toggles are disabled.
+- Auto Exposure is now opt-in behind the camera ownership switch and is released when that switch is off.
+- Added full release paths for color curves/mixer/tone and all owned PPSv2 effect parameters.
+- Disabled the unsafe persisted Auto Exposure/SSR baseline in the live KKS config; the previous config is archived.
+
 ## v2.0.4 — 2026-09-05
 
 ### Added

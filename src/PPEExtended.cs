@@ -8,7 +8,7 @@ using UnityEngine.Rendering.PostProcessing;
 
 namespace PPE_Extended
 {
-    [BepInPlugin("com.user.ppe_extended", "PPE Extended (Full PPSv2)", "2.0.4")]
+    [BepInPlugin("com.user.ppe_extended", "PPE Extended (Full PPSv2)", "2.0.5")]
     [BepInDependency("org.bepinex.plugins.KKS_PostProcessingEffectsV3")]
     public class PPEExtended : BaseUnityPlugin
     {
@@ -674,7 +674,15 @@ namespace PPE_Extended
                     try { ApplyFog(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Fog: " + e.Message); }
                 }
                 if (_aeAvailable)
-                    try { ApplyAutoExposure(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] AutoExposure: " + e.Message); _aeAvailable = false; }
+                    try
+                    {
+                        // Exposure is opt-in. More importantly, release the PPSv2
+                        // override when the camera master switch is off so a
+                        // previous session cannot leave the scene nearly black.
+                        if (EnableCameraOverrides.Value) ApplyAutoExposure();
+                        else ReleaseAutoExposure();
+                    }
+                    catch (Exception e) { Debug.LogWarning("[PPE Ext] AutoExposure: " + e.Message); _aeAvailable = false; }
 
                 // MSVO
                 var ao = (AmbientOcclusion)GMV(_aoObj, __instance);
@@ -702,6 +710,10 @@ namespace PPE_Extended
                         cg.toneCurveShoulderStrength.Override(CTshS.Value); cg.toneCurveShoulderLength.Override(CTshL.Value);
                         cg.toneCurveShoulderAngle.Override(CTshA.Value); cg.toneCurveGamma.Override(CTgamma.Value);
                     }
+                }
+                else if (cg != null)
+                {
+                    ReleaseColorOverrides(cg);
                 }
 
                 // SSR (only init when user enables manually, avoids D3D crash on startup)
@@ -733,6 +745,10 @@ namespace PPE_Extended
                         try { ApplyCA(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] CA: " + e.Message); }
                         try { ApplyMotionBlur(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] MotionBlur: " + e.Message); }
                         try { ApplyVignette(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Vignette: " + e.Message); }
+                    }
+                    else
+                    {
+                        ReleaseEffectOverrides();
                     }
                 }
                 EmitDiagnosticsIfDue();
@@ -883,6 +899,83 @@ namespace PPE_Extended
                 _ssrAvailable = false;
                 Debug.LogWarning("[PPE Ext] SSR init failed: " + e.Message);
                 return false;
+            }
+        }
+
+        static void ClearOverride(ParameterOverride parameter)
+        {
+            if (parameter != null) parameter.overrideState = false;
+        }
+
+        static void ReleaseAutoExposure()
+        {
+            if (_autoExposure == null) return;
+            ClearOverride(_autoExposure.enabled);
+            ClearOverride(_autoExposure.eyeAdaptation);
+            ClearOverride(_autoExposure.minLuminance);
+            ClearOverride(_autoExposure.maxLuminance);
+            ClearOverride(_autoExposure.keyValue);
+            ClearOverride(_autoExposure.speedUp);
+            ClearOverride(_autoExposure.speedDown);
+            ClearOverride(_autoExposure.filtering);
+        }
+
+        static void ReleaseColorOverrides(ColorGrading cg)
+        {
+            ClearOverride(cg.masterCurve); ClearOverride(cg.redCurve);
+            ClearOverride(cg.greenCurve); ClearOverride(cg.blueCurve);
+            ClearOverride(cg.mixerRedOutRedIn); ClearOverride(cg.mixerRedOutGreenIn); ClearOverride(cg.mixerRedOutBlueIn);
+            ClearOverride(cg.mixerGreenOutRedIn); ClearOverride(cg.mixerGreenOutGreenIn); ClearOverride(cg.mixerGreenOutBlueIn);
+            ClearOverride(cg.mixerBlueOutRedIn); ClearOverride(cg.mixerBlueOutGreenIn); ClearOverride(cg.mixerBlueOutBlueIn);
+            ClearOverride(cg.toneCurveToeStrength); ClearOverride(cg.toneCurveToeLength);
+            ClearOverride(cg.toneCurveShoulderStrength); ClearOverride(cg.toneCurveShoulderLength);
+            ClearOverride(cg.toneCurveShoulderAngle); ClearOverride(cg.toneCurveGamma);
+        }
+
+        static void ReleaseEffectOverrides()
+        {
+            if (_ssr != null)
+            {
+                ClearOverride(_ssr.enabled); ClearOverride(_ssr.preset); ClearOverride(_ssr.thickness);
+                ClearOverride(_ssr.maximumMarchDistance); ClearOverride(_ssr.distanceFade);
+                ClearOverride(_ssr.vignette); ClearOverride(_ssr.maximumIterationCount); ClearOverride(_ssr.resolution);
+            }
+            if (_bloom != null)
+            {
+                ClearOverride(_bloom.enabled); ClearOverride(_bloom.intensity); ClearOverride(_bloom.threshold);
+                ClearOverride(_bloom.softKnee); ClearOverride(_bloom.clamp); ClearOverride(_bloom.diffusion);
+                ClearOverride(_bloom.anamorphicRatio); ClearOverride(_bloom.fastMode);
+                ClearOverride(_bloom.dirtIntensity); ClearOverride(_bloom.color);
+            }
+            if (_dof != null)
+            {
+                ClearOverride(_dof.enabled); ClearOverride(_dof.focusDistance); ClearOverride(_dof.aperture);
+                ClearOverride(_dof.focalLength); ClearOverride(_dof.kernelSize);
+            }
+            if (_grain != null)
+            {
+                ClearOverride(_grain.enabled); ClearOverride(_grain.intensity); ClearOverride(_grain.colored);
+                ClearOverride(_grain.size); ClearOverride(_grain.lumContrib);
+            }
+            if (_lensDistortion != null)
+            {
+                ClearOverride(_lensDistortion.enabled); ClearOverride(_lensDistortion.intensity);
+                ClearOverride(_lensDistortion.centerX); ClearOverride(_lensDistortion.centerY); ClearOverride(_lensDistortion.scale);
+            }
+            if (_chromaticAberration != null)
+            {
+                ClearOverride(_chromaticAberration.enabled); ClearOverride(_chromaticAberration.intensity);
+                ClearOverride(_chromaticAberration.fastMode);
+            }
+            if (_motionBlur != null)
+            {
+                ClearOverride(_motionBlur.enabled); ClearOverride(_motionBlur.shutterAngle); ClearOverride(_motionBlur.sampleCount);
+            }
+            if (_vignette != null)
+            {
+                ClearOverride(_vignette.enabled); ClearOverride(_vignette.mode); ClearOverride(_vignette.intensity);
+                ClearOverride(_vignette.smoothness); ClearOverride(_vignette.roundness); ClearOverride(_vignette.center);
+                ClearOverride(_vignette.rounded); ClearOverride(_vignette.opacity); ClearOverride(_vignette.color);
             }
         }
 
