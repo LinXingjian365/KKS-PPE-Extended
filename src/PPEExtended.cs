@@ -8,7 +8,7 @@ using UnityEngine.Rendering.PostProcessing;
 
 namespace PPE_Extended
 {
-    [BepInPlugin("com.user.ppe_extended", "PPE Extended (Full PPSv2)", "2.0.1")]
+    [BepInPlugin("com.user.ppe_extended", "PPE Extended (Full PPSv2)", "2.0.2")]
     [BepInDependency("org.bepinex.plugins.KKS_PostProcessingEffectsV3")]
     public class PPEExtended : BaseUnityPlugin
     {
@@ -101,6 +101,15 @@ namespace PPE_Extended
         public static ConfigEntry<float> VignetteIntensity, VignetteSmoothness, VignetteRoundness, VignetteCenterX, VignetteCenterY, VignetteOpacity;
         public static ConfigEntry<float> VignetteColorR, VignetteColorG, VignetteColorB;
         public static ConfigEntry<bool> VignetteRounded;
+
+        // Built-in PPSv2 camera effects exposed by the original KKS PPE panel.
+        public static ConfigEntry<int> AAMode, SMAAQuality;
+        public static ConfigEntry<bool> FXAAFastMode, FXAAKeepAlpha;
+        public static ConfigEntry<float> TAAJitterSpread, TAASharpness, TAAStationaryBlending, TAAMotionBlending;
+        public static ConfigEntry<bool> FogEnable;
+        public static ConfigEntry<FogMode> FogModeSelected;
+        public static ConfigEntry<float> FogDensity, FogStart, FogEnd, FogHeight;
+        public static ConfigEntry<float> FogColorR, FogColorG, FogColorB;
 
         // Master toggle for color overrides (default OFF = do not touch PPE panel values)
         public static ConfigEntry<bool> EnableColorOverrides;
@@ -224,6 +233,25 @@ namespace PPE_Extended
             VignetteColorG = CfgR("Vignette", "ColorG", 0f, 0f, 1f);
             VignetteColorB = CfgR("Vignette", "ColorB", 0f, 0f, 1f);
 
+            AAMode = Config.Bind("AntiAliasing", "Mode", 0, "0=None 1=FXAA 2=SMAA 3=TAA");
+            SMAAQuality = Config.Bind("AntiAliasing", "SMAAQuality", 1, "0=Low 1=Medium 2=High");
+            FXAAFastMode = CfgB("AntiAliasing", "FXAAFastMode", false);
+            FXAAKeepAlpha = CfgB("AntiAliasing", "FXAAKeepAlpha", false);
+            TAAJitterSpread = CfgR("AntiAliasing", "TAAJitterSpread", 0.75f, 0.1f, 1f);
+            TAASharpness = CfgR("AntiAliasing", "TAASharpness", 0.3f, 0f, 3f);
+            TAAStationaryBlending = CfgR("AntiAliasing", "TAAStationaryBlending", 0.95f, 0f, 0.99f);
+            TAAMotionBlending = CfgR("AntiAliasing", "TAAMotionBlending", 0.85f, 0f, 0.99f);
+
+            FogEnable = CfgB("Fog", "Enable", false);
+            FogModeSelected = Config.Bind("Fog", "Mode", FogMode.ExponentialSquared, "Unity fog mode");
+            FogDensity = CfgR("Fog", "Density", 1f, 0f, 100f);
+            FogStart = CfgR("Fog", "Start", 1f, 0f, 100f);
+            FogEnd = CfgR("Fog", "End", 20f, 0f, 100f);
+            FogHeight = CfgR("Fog", "Height", 20f, 0f, 100f);
+            FogColorR = CfgR("Fog", "ColorR", 1f, 0f, 1f);
+            FogColorG = CfgR("Fog", "ColorG", 1f, 0f, 1f);
+            FogColorB = CfgR("Fog", "ColorB", 1f, 0f, 1f);
+
             UIScale = CfgR("UI", "Scale", 1f, 0.5f, 2f);
             ToggleKey = Config.Bind("UI", "ToggleWindow", new KeyboardShortcut(KeyCode.P, KeyCode.LeftControl));
             EnableColorOverrides = CfgB("General", "EnableColorOverrides", false);
@@ -271,7 +299,7 @@ namespace PPE_Extended
             if (!_showWindow) return;
             float s = UIScale.Value;
             GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(s, s, 1f));
-            _windowRect = GUILayout.Window(_windowId, _windowRect, DrawWindow, "PPE Full PPSv2 Color Panel v2.0.1  [Ctrl+P]", GUILayout.Width(360));
+            _windowRect = GUILayout.Window(_windowId, _windowRect, DrawWindow, "PPE Full PPSv2 Color Panel v2.0.2  [Ctrl+P]", GUILayout.Width(360));
             GUI.matrix = Matrix4x4.identity;
         }
 
@@ -294,8 +322,8 @@ namespace PPE_Extended
                 GUILayout.Label("Color overrides OFF - PPE panel values are untouched", GUILayout.Width(340));
             GUILayout.Space(3);
 
-            string[] tabs = { "Trackballs", "Curves", "Mixer", "CustomTone", "Bloom", "DoF", "Grain", "Lens", "CA", "Blur", "Vignette", "SSR", "MSVO" };
-            _tab = GUILayout.SelectionGrid(_tab, tabs, 7, GUI.skin.button);
+            string[] tabs = { "Trackballs", "Curves", "Mixer", "CustomTone", "Bloom", "DoF", "Grain", "Lens", "CA", "Blur", "Vignette", "SSR", "MSVO", "AutoExp", "AA", "Fog" };
+            _tab = GUILayout.SelectionGrid(_tab, tabs, 8, GUI.skin.button);
 
             if (_tab == 0) DrawTrackballs(ppe);
             else if (_tab == 1) DrawCurves();
@@ -310,6 +338,9 @@ namespace PPE_Extended
             else if (_tab == 10) DrawVignette();
             else if (_tab == 11) DrawSSR();
             else if (_tab == 12) DrawMSVO(ppe);
+            else if (_tab == 13) DrawAutoExposure();
+            else if (_tab == 14) DrawAntiAliasing();
+            else if (_tab == 15) DrawFog();
 
             GUILayout.Space(8);
             GUILayout.EndScrollView();
@@ -455,6 +486,43 @@ namespace PPE_Extended
             }
         }
 
+        void DrawAntiAliasing()
+        {
+            Section("Anti-Aliasing", "PPSv2 PostProcessLayer camera anti-aliasing");
+            AAMode.Value = GUILayout.SelectionGrid(AAMode.Value, new[] { "None", "FXAA", "SMAA", "TAA" }, 4, GUI.skin.toggle);
+            if (AAMode.Value == 1)
+            {
+                FXAAFastMode.Value = GUILayout.Toggle(FXAAFastMode.Value, "  FXAA Fast Mode");
+                FXAAKeepAlpha.Value = GUILayout.Toggle(FXAAKeepAlpha.Value, "  FXAA Keep Alpha");
+            }
+            else if (AAMode.Value == 2)
+            {
+                SMAAQuality.Value = GUILayout.SelectionGrid(SMAAQuality.Value, new[] { "Low", "Medium", "High" }, 3, GUI.skin.toggle);
+            }
+            else if (AAMode.Value == 3)
+            {
+                Slider("Jitter Spread", 0.1f, 1f, TAAJitterSpread);
+                Slider("Sharpness", 0f, 3f, TAASharpness);
+                Slider("Stationary Blend", 0f, 0.99f, TAAStationaryBlending);
+                Slider("Motion Blend", 0f, 0.99f, TAAMotionBlending);
+            }
+            if (_boundLayer == null) GUILayout.Label("Waiting for active PostProcessLayer");
+        }
+
+        void DrawFog()
+        {
+            Section("Fog", "Unity RenderSettings fog and PPSv2 deferred fog");
+            FogEnable.Value = GUILayout.Toggle(FogEnable.Value, "  Enable Fog");
+            FogModeSelected.Value = (FogMode)GUILayout.SelectionGrid((int)FogModeSelected.Value, new[] { "Linear", "Exp", "Exp2" }, 3, GUI.skin.toggle);
+            Slider("Density", 0f, 100f, FogDensity);
+            Slider("Start", 0f, 100f, FogStart);
+            Slider("End", 0f, 100f, FogEnd);
+            Slider("Height", 0f, 100f, FogHeight);
+            Slider("Color R", 0f, 1f, FogColorR);
+            Slider("Color G", 0f, 1f, FogColorG);
+            Slider("Color B", 0f, 1f, FogColorB);
+        }
+
         void DrawBloom()
         {
             Section("Bloom", "PPSv2 full bloom parameters");
@@ -577,6 +645,11 @@ namespace PPE_Extended
                 // profile identity so values reach the active render path.
                 if (!RefreshBinding(__instance)) return;
 
+                try { ApplyAntiAliasing(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] AntiAliasing: " + e.Message); }
+                try { ApplyFog(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Fog: " + e.Message); }
+                if (_aeAvailable)
+                    try { ApplyAutoExposure(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] AutoExposure: " + e.Message); _aeAvailable = false; }
+
                 // MSVO
                 var ao = (AmbientOcclusion)GMV(_aoObj, __instance);
                 if (ao != null && ao.enabled.value && ao.mode.value == AmbientOcclusionMode.MultiScaleVolumetricObscurance)
@@ -689,6 +762,8 @@ namespace PPE_Extended
                 Debug.Log("[PPE Ext] Bound profile='" + (_boundProfile != null ? _boundProfile.name : "null") +
                           "' settings=" + (_boundProfile != null ? _boundProfile.settings.Count.ToString() : "0") +
                           " layer=" + layerState + " camera=" + cameraState +
+                          " aa=" + (_boundLayer != null ? _boundLayer.antialiasingMode.ToString() : "missing") +
+                          " fog=" + (FogEnable != null && FogEnable.Value ? "on" : "off") +
                           " bloom=" + (_bloom != null && _bloom.enabled != null ? _bloom.enabled.value.ToString() : "missing") +
                           " dof=" + (_dof != null && _dof.enabled != null ? _dof.enabled.value.ToString() : "missing") +
                           " grain=" + (_grain != null && _grain.enabled != null ? _grain.enabled.value.ToString() : "missing") +
@@ -803,6 +878,36 @@ namespace PPE_Extended
             if (_ssr.vignette != null) _ssr.vignette.Override(SSRvignette.Value);
             if (_ssr.maximumIterationCount != null) _ssr.maximumIterationCount.Override((int)SSRiterations.Value);
             if (_ssr.resolution != null) _ssr.resolution.Override((ScreenSpaceReflectionResolution)SSRresolution.Value);
+        }
+
+        static void ApplyAntiAliasing()
+        {
+            if (_boundLayer == null) return;
+            _boundLayer.antialiasingMode = (PostProcessLayer.Antialiasing)Mathf.Clamp(AAMode.Value, 0, 3);
+            _boundLayer.subpixelMorphologicalAntialiasing.quality =
+                (SubpixelMorphologicalAntialiasing.Quality)Mathf.Clamp(SMAAQuality.Value, 0, 2);
+            _boundLayer.fastApproximateAntialiasing.fastMode = FXAAFastMode.Value;
+            _boundLayer.fastApproximateAntialiasing.keepAlpha = FXAAKeepAlpha.Value;
+            _boundLayer.temporalAntialiasing.jitterSpread = TAAJitterSpread.Value;
+            _boundLayer.temporalAntialiasing.sharpness = TAASharpness.Value;
+            _boundLayer.temporalAntialiasing.stationaryBlending = TAAStationaryBlending.Value;
+            _boundLayer.temporalAntialiasing.motionBlending = TAAMotionBlending.Value;
+        }
+
+        static void ApplyFog()
+        {
+            var color = new Color(FogColorR.Value, FogColorG.Value, FogColorB.Value, 1f);
+            RenderSettings.fog = FogEnable.Value;
+            RenderSettings.fogMode = FogModeSelected.Value;
+            RenderSettings.fogDensity = FogDensity.Value;
+            RenderSettings.fogStartDistance = FogStart.Value;
+            RenderSettings.fogEndDistance = FogEnd.Value;
+            RenderSettings.fogColor = color;
+            if (_boundLayer != null && _boundLayer.fog != null)
+            {
+                _boundLayer.fog.enabled = FogEnable.Value;
+                _boundLayer.fog.excludeSkybox = true;
+            }
         }
 
         static void ApplyCurves(ColorGrading cg)

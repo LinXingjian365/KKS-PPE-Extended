@@ -6,7 +6,7 @@ Extends the original KKS PostProcessingEffects plugin with a standalone floating
 
 ## Features
 
-13 tabs covering every PPSv2 effect:
+16 tabs covering the Unity 2019 PPSv2/KKS PPE surface:
 
 | Tab | Effect | Key Parameters |
 |-----|--------|---------------|
@@ -23,6 +23,9 @@ Extends the original KKS PostProcessingEffects plugin with a standalone floating
 | Vignette | Vignette | Classic/Masked mode, intensity, smoothness, roundness, center, color |
 | SSR | Screen Space Reflections | Preset, thickness, march distance, fade, vignette, iterations |
 | MSVO | Ambient Occlusion | ScalableAO/MSVO switch, thickness, direct light, tolerances |
+| AutoExp | Auto Exposure | Fixed/progressive adaptation, luminance bounds, key value |
+| AA | PostProcessLayer AA | None, FXAA, SMAA, TAA and their parameters |
+| Fog | Unity/PPSv2 Fog | Mode, density, distance, height, color |
 
 ## Design Principles
 
@@ -33,6 +36,7 @@ Extends the original KKS PostProcessingEffects plugin with a standalone floating
 - **Panel scale slider** (0.5x–2x) for HiDPI displays.
 - Rebinds automatically when KKS replaces the active post-process volume/profile during a scene load.
 - Emits throttled runtime diagnostics for the bound profile, layer, camera path, and effect state.
+- Applies the original KKS camera AA and fog controls through the active PostProcessLayer.
 
 ## Requirements
 

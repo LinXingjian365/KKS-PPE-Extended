@@ -6,6 +6,10 @@ All issues encountered during development, their root causes, and fixes. This do
 
 ## PPE_Extended Plugin Issues
 
+### 22. Original PPE camera features missing from the extended panel
+
+The previous release focused on volume effects and omitted the original KKS PPE camera controls. v2.0.2 adds FXAA, SMAA, TAA, Fog, and the missing Auto Exposure UI/application path. SSR remains a renderer limitation in Forward mode, not a missing parameter.
+
 ### 21. Effects appeared in the panel but did not affect the image after changing scenes
 
 **Root Cause**: KKS Studio can replace the `PostProcessVolume` or its profile during scene transitions. The old extension cached the first profile forever, so later writes could target a stale profile. Its startup message also incorrectly reported v1.4.2 even though the DLL metadata was v2.0.0, making deployment verification misleading.

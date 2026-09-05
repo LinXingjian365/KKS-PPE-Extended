@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.0.2 — 2026-09-05
+
+### Added
+- Added the missing KKS PPE camera controls: FXAA, SMAA, TAA, and Fog.
+- Added the Auto Exposure tab and safe runtime application path.
+- Runtime diagnostics now report active anti-aliasing and fog state.
+
 ## v2.0.1 — 2026-09-05
 
 ### Fixed
