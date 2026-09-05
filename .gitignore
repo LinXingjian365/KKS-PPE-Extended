@@ -1,0 +1,9 @@
+bin/
+obj/
+backups/
+b64_*.txt
+src_b64.txt
+*.user
+*.suo
+.vs/
+*.pdb
