@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.0.3 — 2026-09-05
+
+### Fixed
+- Added compatibility ownership gates so the extension no longer fights the original KKS PPE plugin.
+- Removed first-bind writes that forced newly discovered effects disabled.
+- Original PPE remains authoritative by default; extension ownership is opt-in for volume effects and camera AA/Fog.
+
 ## v2.0.2 — 2026-09-05
 
 ### Added

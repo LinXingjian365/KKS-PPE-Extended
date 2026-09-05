@@ -6,6 +6,12 @@ All issues encountered during development, their root causes, and fixes. This do
 
 ## PPE_Extended Plugin Issues
 
+### 23. Original PPE and PPE Extended fought over the same settings
+
+Both plugins operate on the same PPSv2 profile and camera layer. The old extension wrote effect `enabled` values every frame, so an extension default of `false` could silently disable an effect selected in the original panel.
+
+**Fix**: v2.0.3 adds two explicit ownership gates. `EnableEffectOverrides=false` preserves the original PPE volume effects. `EnableCameraOverrides=false` preserves original AA/Fog. The extension only writes those settings after the user enables the corresponding ownership option. The extension no longer disables effects during profile discovery.
+
 ### 22. Original PPE camera features missing from the extended panel
 
 The previous release focused on volume effects and omitted the original KKS PPE camera controls. v2.0.2 adds FXAA, SMAA, TAA, Fog, and the missing Auto Exposure UI/application path. SSR remains a renderer limitation in Forward mode, not a missing parameter.

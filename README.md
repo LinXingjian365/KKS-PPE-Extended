@@ -30,7 +30,8 @@ Extends the original KKS PostProcessingEffects plugin with a standalone floating
 ## Design Principles
 
 - **Color Overrides master switch (default OFF)**: Curves/Mixer/CustomTone do NOT touch PPE panel values until explicitly enabled. This prevents the extension from fighting with your existing PPE settings.
-- **All other effects have independent enable toggles**, default OFF.
+- **Compatibility mode is default**: the original KKS PPE owns effect enable states and values. The extension does not write them unless **Take Ownership of PPSv2 Effects** is enabled.
+- Camera AA/Fog are similarly untouched unless **Take Ownership of Camera AA/Fog** is enabled.
 - **Pure English UI** — no translated strings.
 - **Standalone floating window** (Ctrl+P) — does not modify the original PPE panel layout.
 - **Panel scale slider** (0.5x–2x) for HiDPI displays.
@@ -54,10 +55,11 @@ Extends the original KKS PostProcessingEffects plugin with a standalone floating
 
 ## Usage
 
-1. Open the original PPE panel and enable the effects you want (Color Grading, Bloom, etc.).
+1. Open the original PPE panel and enable the effects you want (Color Grading, Bloom, etc.). In the default compatibility mode, those original controls remain authoritative.
 2. Press **Ctrl+P** to open the extended panel.
 3. For Curves/Mixer/CustomTone: tick **"Enable Color Overrides"** at the top of the panel.
-4. For other effects: tick the **"Enable X"** toggle inside each tab.
+4. To let this extension control Bloom/DoF/Grain/Lens/CA/Blur/Vignette/SSR, explicitly enable **"Take Ownership of PPSv2 Effects"** first. Otherwise their original PPE values are preserved.
+5. To let this extension control FXAA/SMAA/TAA/Fog, explicitly enable **"Take Ownership of Camera AA/Fog"** first.
 5. Adjust sliders — changes apply in real-time.
 
 ### Hotkeys

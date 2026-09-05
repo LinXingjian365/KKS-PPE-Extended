@@ -8,7 +8,7 @@ using UnityEngine.Rendering.PostProcessing;
 
 namespace PPE_Extended
 {
-    [BepInPlugin("com.user.ppe_extended", "PPE Extended (Full PPSv2)", "2.0.2")]
+    [BepInPlugin("com.user.ppe_extended", "PPE Extended (Full PPSv2)", "2.0.3")]
     [BepInDependency("org.bepinex.plugins.KKS_PostProcessingEffectsV3")]
     public class PPEExtended : BaseUnityPlugin
     {
@@ -113,6 +113,8 @@ namespace PPE_Extended
 
         // Master toggle for color overrides (default OFF = do not touch PPE panel values)
         public static ConfigEntry<bool> EnableColorOverrides;
+        public static ConfigEntry<bool> EnableEffectOverrides;
+        public static ConfigEntry<bool> EnableCameraOverrides;
 
         // UI
         public static ConfigEntry<float> UIScale;
@@ -255,6 +257,8 @@ namespace PPE_Extended
             UIScale = CfgR("UI", "Scale", 1f, 0.5f, 2f);
             ToggleKey = Config.Bind("UI", "ToggleWindow", new KeyboardShortcut(KeyCode.P, KeyCode.LeftControl));
             EnableColorOverrides = CfgB("General", "EnableColorOverrides", false);
+            EnableEffectOverrides = CfgB("General", "EnableEffectOverrides", false);
+            EnableCameraOverrides = CfgB("General", "EnableCameraOverrides", false);
 
             _ppeType = AccessTools.TypeByName("PostProcessingEffectsV3.PostProcessingEffectsV3");
             if (_ppeType == null) { Logger.LogError("PPE type not found"); return; }
@@ -299,7 +303,7 @@ namespace PPE_Extended
             if (!_showWindow) return;
             float s = UIScale.Value;
             GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(s, s, 1f));
-            _windowRect = GUILayout.Window(_windowId, _windowRect, DrawWindow, "PPE Full PPSv2 Color Panel v2.0.2  [Ctrl+P]", GUILayout.Width(360));
+            _windowRect = GUILayout.Window(_windowId, _windowRect, DrawWindow, "PPE Full PPSv2 Color Panel v2.0.3  [Ctrl+P]", GUILayout.Width(360));
             GUI.matrix = Matrix4x4.identity;
         }
 
@@ -320,6 +324,12 @@ namespace PPE_Extended
             if (co != EnableColorOverrides.Value) EnableColorOverrides.Value = co;
             if (!EnableColorOverrides.Value)
                 GUILayout.Label("Color overrides OFF - PPE panel values are untouched", GUILayout.Width(340));
+            bool eo = GUILayout.Toggle(EnableEffectOverrides.Value, "  Take Ownership of PPSv2 Effects");
+            if (eo != EnableEffectOverrides.Value) EnableEffectOverrides.Value = eo;
+            if (!EnableEffectOverrides.Value)
+                GUILayout.Label("Compatibility mode - original PPE effect toggles are untouched", GUILayout.Width(340));
+            bool cam = GUILayout.Toggle(EnableCameraOverrides.Value, "  Take Ownership of Camera AA/Fog");
+            if (cam != EnableCameraOverrides.Value) EnableCameraOverrides.Value = cam;
             GUILayout.Space(3);
 
             string[] tabs = { "Trackballs", "Curves", "Mixer", "CustomTone", "Bloom", "DoF", "Grain", "Lens", "CA", "Blur", "Vignette", "SSR", "MSVO", "AutoExp", "AA", "Fog" };
@@ -645,8 +655,11 @@ namespace PPE_Extended
                 // profile identity so values reach the active render path.
                 if (!RefreshBinding(__instance)) return;
 
-                try { ApplyAntiAliasing(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] AntiAliasing: " + e.Message); }
-                try { ApplyFog(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Fog: " + e.Message); }
+                if (EnableCameraOverrides.Value)
+                {
+                    try { ApplyAntiAliasing(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] AntiAliasing: " + e.Message); }
+                    try { ApplyFog(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Fog: " + e.Message); }
+                }
                 if (_aeAvailable)
                     try { ApplyAutoExposure(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] AutoExposure: " + e.Message); _aeAvailable = false; }
 
@@ -691,20 +704,23 @@ namespace PPE_Extended
                         if (cam != null && cam.depthTextureMode != DepthTextureMode.Depth)
                             cam.depthTextureMode = DepthTextureMode.Depth;
                     }
-                    if (_ssrAvailable && _ssr != null)
+                    if (EnableEffectOverrides.Value)
                     {
-                        try { ApplySSR(); }
-                        catch (Exception e) { Debug.LogWarning("[PPE Ext] SSR apply error: " + e.Message); _ssrAvailable = false; }
-                    }
+                        if (_ssrAvailable && _ssr != null)
+                        {
+                            try { ApplySSR(); }
+                            catch (Exception e) { Debug.LogWarning("[PPE Ext] SSR apply error: " + e.Message); _ssrAvailable = false; }
+                        }
 
-                    // All other PPSv2 effects
-                    try { ApplyBloom(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Bloom: " + e.Message); }
-                    try { ApplyDoF(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] DoF: " + e.Message); }
-                    try { ApplyGrain(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Grain: " + e.Message); }
-                    try { ApplyLensDistortion(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] LensDist: " + e.Message); }
-                    try { ApplyCA(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] CA: " + e.Message); }
-                    try { ApplyMotionBlur(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] MotionBlur: " + e.Message); }
-                    try { ApplyVignette(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Vignette: " + e.Message); }
+                        // Only write effect parameters in explicit ownership mode.
+                        try { ApplyBloom(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Bloom: " + e.Message); }
+                        try { ApplyDoF(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] DoF: " + e.Message); }
+                        try { ApplyGrain(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Grain: " + e.Message); }
+                        try { ApplyLensDistortion(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] LensDist: " + e.Message); }
+                        try { ApplyCA(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] CA: " + e.Message); }
+                        try { ApplyMotionBlur(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] MotionBlur: " + e.Message); }
+                        try { ApplyVignette(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Vignette: " + e.Message); }
+                    }
                 }
                 EmitDiagnosticsIfDue();
             }
@@ -927,31 +943,24 @@ namespace PPE_Extended
             {
                 if (!profile.HasSettings<Bloom>()) _bloom = profile.AddSettings<Bloom>();
                 else profile.TryGetSettings<Bloom>(out _bloom);
-                if (_bloom != null && _bloom.enabled != null) _bloom.enabled.Override(false);
 
                 if (!profile.HasSettings<DepthOfField>()) _dof = profile.AddSettings<DepthOfField>();
                 else profile.TryGetSettings<DepthOfField>(out _dof);
-                if (_dof != null && _dof.enabled != null) _dof.enabled.Override(false);
 
                 if (!profile.HasSettings<Grain>()) _grain = profile.AddSettings<Grain>();
                 else profile.TryGetSettings<Grain>(out _grain);
-                if (_grain != null && _grain.enabled != null) _grain.enabled.Override(false);
 
                 if (!profile.HasSettings<LensDistortion>()) _lensDistortion = profile.AddSettings<LensDistortion>();
                 else profile.TryGetSettings<LensDistortion>(out _lensDistortion);
-                if (_lensDistortion != null && _lensDistortion.enabled != null) _lensDistortion.enabled.Override(false);
 
                 if (!profile.HasSettings<ChromaticAberration>()) _chromaticAberration = profile.AddSettings<ChromaticAberration>();
                 else profile.TryGetSettings<ChromaticAberration>(out _chromaticAberration);
-                if (_chromaticAberration != null && _chromaticAberration.enabled != null) _chromaticAberration.enabled.Override(false);
 
                 if (!profile.HasSettings<MotionBlur>()) _motionBlur = profile.AddSettings<MotionBlur>();
                 else profile.TryGetSettings<MotionBlur>(out _motionBlur);
-                if (_motionBlur != null && _motionBlur.enabled != null) _motionBlur.enabled.Override(false);
 
                 if (!profile.HasSettings<Vignette>()) _vignette = profile.AddSettings<Vignette>();
                 else profile.TryGetSettings<Vignette>(out _vignette);
-                if (_vignette != null && _vignette.enabled != null) _vignette.enabled.Override(false);
 
                 Debug.Log("[PPE Ext] All PPSv2 effects ensured in profile");
             }
