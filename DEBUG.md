@@ -4,7 +4,56 @@ All issues encountered during development, their root causes, and fixes. This do
 
 ---
 
+## SSR on KKS (v2.1.0)
+
+PPSv2 Screen Space Reflections requires the camera's Deferred G-buffer and
+therefore reports unsupported on KKS's normal Forward path. Open the SSR tab,
+enable **Force Deferred path while SSR is enabled**, then initialize SSR while
+**Take Ownership of PPSv2 Effects** is enabled. The panel reports the active
+camera path and the log records the transition. Disabling the option or SSR
+restores the previous camera path automatically.
+
+---
+
 ## PPE_Extended Plugin Issues
+
+### 30. Taking ownership made effects vanish and sliders seemed dead
+
+**Symptom**: Ticking *Take Ownership of PPSv2 Effects* removed bloom; moving Bloom sliders afterwards appeared to do nothing.
+**Root Cause**: Ownership started from the extension's own stored values (Bloom Intensity 0, Threshold later dragged to 3.1) instead of the original's (2.8 / 0.89). With a threshold above almost every HDR pixel, intensity changes are invisible.
+**Fix (v2.0.6)**: On the rising edge of an ownership switch the original PPE's live values are copied into the extension (`[General] CopyOriginalOnOwnership`, default true); a **Copy Current Original PPE Values** button does it manually. Bloom Clamp range was widened to 0..65472 so the copy is exact.
+
+### 29. Plugin `Debug.Log` output missing from Player.log; Harmony postfix looked dead
+
+**Symptom**: In 2.0.6 sessions not a single `Debug.Log` from this plugin reached `Player.log` (other plugins' lines were present; 2.0.4 sessions had logged 800+ lines the same way), which made the Harmony postfix on the original `Update` look like it never ran.
+**Facts**: Routing the same diagnostics through the BepInEx `ManualLogSource` showed the postfix does fire and binding works (`Rebound: profile='' settings=9 layer=enabled camera=Main Camera/Forward`). Why Unity swallowed this plugin's `Debug.Log` was not identified.
+**Fix (v2.0.6)**: All logging uses the BepInEx logger, and the per-frame work is driven from the extension's own `Update()`, so neither Unity log capture nor patching the original's `Update` is load-bearing. The postfix is kept only to log once whether it fired.
+
+### 28. Curves still had no effect in HDR grading mode after #25
+
+**Symptom**: With `overrideState` fixed (#25), Master/RGB curve presets still changed nothing.
+**Root Cause**: Decompiled `ColorGradingRenderer.GetCurveTexture(bool hdr)` only writes the master/R/G/B (YRGB) curves into the curve texture when `hdr` is false; both HDR pipelines (`RenderHDRPipeline2D/3D`) call it with `hdr: true`. KKS PPE runs `GradingMode = HighDefinitionRange`, so YRGB curves are structurally inert. Only `hueVsHueCurve`, `hueVsSatCurve`, `satVsSatCurve`, `lumVsSatCurve` are sampled in HDR (0.5 = neutral; 1.0 doubles saturation / +180 deg hue; 0 removes it).
+**Fix (v2.0.6)**: The Curves tab exposes those four curves as band sliders (8 hue bands, 3 luminance/saturation points, flat-tangent AnimationCurves, looping for the hue curves) and labels the YRGB controls as LDR-only.
+
+### 27. Numeric text fields could not be typed into (v2.0.4)
+
+**Symptom**: Clicking the number box next to a slider and typing produced garbage or the cursor jumped; only the slider was usable.
+**Root Cause**: `FloatField` rebuilt the TextField text from `val.ToString("F2")` every frame, so each keystroke was immediately re-parsed and re-formatted.
+**Fix (v2.0.6)**: Focus-aware field. While the control has keyboard focus the raw typed text is kept in a buffer and shown as-is; the value is committed live whenever the text parses, and the text snaps back to F2 when focus leaves (Enter / Escape also blur the field). Field names are `Section.Key` so the same label on two tabs cannot share an edit buffer.
+
+### 26. v2.0.5 per-frame "release" disabled the original PPE's effects (never deployed)
+
+**Symptom**: With the extension's master switches OFF (the default), original PPE Bloom / DoF / Vignette / Grain / CA / Lens Distortion / Motion Blur stopped rendering.
+**Root Cause**: v2.0.5 cleared `overrideState` on every effect parameter every frame while a master switch was off. The original PPE writes its overrides only in `Settings()` (called from `Setup()` and its config `SettingChanged` handler), not per frame, and this extension's Harmony postfix runs after the original `Update`. PPSv2 volume blending (`PostProcessLayer.OverrideSettings`) only applies parameters whose `overrideState` is true, so the original effects vanished.
+**Fix (v2.0.6)**: Release happens once, on the falling edge of a master switch, only for the parameters this extension writes (curves / mixer / tone curve for the color group; bloom / DoF / grain / lens / CA / motion blur / vignette / SSR for the effect group). Immediately afterwards the original `Settings()` is invoked via reflection so its own values are re-applied in the same frame. The old "Release All Overrides" button — which searched for a NonPublic `overrideState` field although the field is public, and therefore never released anything — is replaced by **Return Control to Original PPE**, which turns all three switches off and runs the same edge logic.
+**Lesson**: Never clear `overrideState` on parameters another plugin owns unless you also make that plugin re-apply them.
+
+### 25. Curves tab had no effect in every version before 2.0.6
+
+**Symptom**: Curves preset / strength / black lift / white crush / RGB offsets changed nothing on screen.
+**Root Cause**: `ApplyCurves` assigned `cg.masterCurve.value.curve` (and the R/G/B curves) but never set `overrideState = true`. Decompiled `PostProcessLayer.OverrideSettings` skips every parameter whose `overrideState` is false, and `PostProcessProfile.AddSettings` only sets `enabled.value`, so the curves never reached the renderer. (This also means the "extreme Curves values" blamed in issue #1 were inert; the black screen came from the Custom Tone / MSVO values.)
+**Fix (v2.0.6)**: `overrideState` is set on the master/R/G/B curves while Color Overrides is on and cleared again on the falling edge (see #26). Curves are rebuilt only when a `[Curves]` config value changes or the bound `ColorGrading` instance changes; previously new `AnimationCurve`s were allocated every frame.
+
 
 ### 24. Unified panel architecture
 

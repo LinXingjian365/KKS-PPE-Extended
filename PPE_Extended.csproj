@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net471</TargetFramework>
     <AssemblyName>PPE_Extended</AssemblyName>
-    <Version>2.0.5</Version>
+    <Version>2.1.0</Version>
     <LangVersion>latest</LangVersion>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <NoWarn>CS0618,CS0414,CS0168,CS0219,CS0649</NoWarn>
@@ -34,6 +34,18 @@
     </Reference>
     <Reference Include="KKS_PostProcessingEffect">
       <HintPath>D:\Koikatsu Sunshine\BepInEx\plugins\KKS_PostProcessingEffect.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="KKSAPI">
+      <HintPath>D:\Koikatsu Sunshine\BepInEx\plugins\KKSAPI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="KKS_ExtensibleSaveFormat">
+      <HintPath>D:\Koikatsu Sunshine\BepInEx\plugins\KKS_BepisPlugins\KKS_ExtensibleSaveFormat.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>D:\Koikatsu Sunshine\CharaStudio_Data\Managed\Assembly-CSharp.dll</HintPath>
       <Private>False</Private>
     </Reference>
   </ItemGroup>

@@ -1,6 +1,44 @@
 # Changelog
 
-## [2.0.5] - 2026-09-05
+## [2.1.0] - 2026-09-11
+
+### Added
+- Opt-in `ForceDeferredForSSR` mode for testing PPSv2 Screen Space Reflections on KKS cameras that normally use Forward rendering.
+- Camera-path restoration when SSR is disabled, the profile changes, or the plugin unloads.
+- Depth and motion-vector requests plus active camera-path reporting in the SSR panel.
+- A PPSv2 `Custom` SSR preset so custom thickness, fade, vignette, resolution, and iteration controls are no longer overwritten every frame.
+
+### Fixed
+- Custom SSR ranges now match Unity PPSv2 (thickness 1–64, fade/vignette 0–1, iterations 4–256).
+
+## [2.0.6] - 2026-09-06
+
+### Fixed
+- **Curves tab now actually affects the image.** `ApplyCurves` assigned the curve but never set `overrideState`, and PPSv2 volume blending ignores parameters whose `overrideState` is false — so Curves had been a no-op in every earlier version. See DEBUG.md #25.
+- **Turning a master switch OFF hands control back cleanly.** Only the parameters this extension wrote are released (once, on the falling edge) and the original PPE `Settings()` is invoked so its own values are re-applied immediately. The old "Release All Overrides" button (which cleared nothing — it looked for a NonPublic `overrideState` field that is public) is replaced by **Return Control to Original PPE**. See DEBUG.md #26.
+- **Numeric fields next to sliders can be typed into.** The field kept re-formatting its text every frame. See DEBUG.md #27.
+- Startup log said v2.0.0; the version is now a single constant used by the plugin attribute, window title and log.
+- Curves are rebuilt only when a Curves setting changes or the bound ColorGrading changes, instead of allocating new `AnimationCurve`s every frame.
+- SSR tab help text corrected (needs a Deferred G-buffer; no effect in KKS Forward).
+
+### Changed
+- Per-frame work runs from the extension's own `Update()` instead of a Harmony postfix on the original's `Update` (the postfix remains only as a diagnostic). All logging goes through the BepInEx logger, so everything is in `BepInEx/LogOutput.log` (DEBUG.md #29).
+- Bloom Clamp range widened to 0..65472 to match the original PPE.
+- The "Bound profile=..." diagnostic line is no longer written every 2 seconds. One `Rebound:` line is logged whenever the bound volume/profile/layer/camera changes. Set `[General] VerboseDiagnostics = true` to get the periodic line back.
+
+### Added
+- **HDR-safe curves.** The Curves tab now exposes the four secondary curves PPSv2 actually samples in HighDefinitionRange grading mode: Hue vs Saturation and Hue vs Hue (8 hue bands each), Luminance vs Saturation and Saturation vs Saturation (shadows/mid/highlights). Master/RGB curves stay available but are labelled LDR-only, because `ColorGradingRenderer.GetCurveTexture(hdr: true)` ignores them (DEBUG.md #28).
+- **Ownership starts from the original's current values.** Enabling *Take Ownership of PPSv2 Effects* or *Camera AA/Fog* first copies the original PPE's live values into the panel (`[General] CopyOriginalOnOwnership`, default on), and a **Copy Current Original PPE Values** button does it on demand, so the picture does not change until you move something (DEBUG.md #30).
+- **Status line** at the top of the panel: original PPE on/off, bound state, Color Grading on/off with grading mode and tonemapper.
+- Color tabs warn when Color Grading is off in the original PPE and offer to enable it; enabling Color Overrides turns it on automatically. CustomTone gets **Set Original Tonemapper to Custom**.
+- **Presets tab**: save / load / delete named presets of all extension settings (every section except `UI`) as `BepInEx/plugins/PPE_Extended_Presets/<name>.cfg`. Files use the BepInEx `[Section]` / `Key = value` layout and are human-editable; unknown keys are ignored.
+- **Scene persistence**: extension settings are stored in Studio scene files (ExtensibleSaveFormat id `com.user.ppe_extended`) when a scene is saved and restored on Load and Import (not on Clear / new scene) — the same policy as Save_PostProcessingEffects uses for the original PPE.
+- New hard dependencies: KKSAPI (`marco.kkapi` >= 1.35) and ExtensibleSaveFormat (`com.bepis.bepinex.extendedsave` >= 16.8.1). Both ship with the standard KKS BepisPlugins set.
+
+### Notes
+- v2.0.5 existed as source only and must not be deployed: its per-frame release disabled the original PPE's effects whenever a master switch was off (DEBUG.md #26). v2.0.6 is built on the v2.0.4 build that was actually in use.
+
+## [2.0.5] - 2026-09-05 (source only, withdrawn)
 
 - Fixed stale PPSv2 override states persisting after the master toggles are disabled.
 - Auto Exposure is now opt-in behind the camera ownership switch and is released when that switch is off.

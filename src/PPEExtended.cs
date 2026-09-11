@@ -1,22 +1,35 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
 using System.Reflection;
+using System.Text;
 using BepInEx;
 using BepInEx.Configuration;
+using ExtensibleSaveFormat;
 using HarmonyLib;
 using UnityEngine;
 using UnityEngine.Rendering.PostProcessing;
 
 namespace PPE_Extended
 {
-    [BepInPlugin("com.user.ppe_extended", "PPE Extended (Full PPSv2)", "2.0.5")]
+    [BepInPlugin(GUID, "PPE Extended (Full PPSv2)", Version)]
     [BepInDependency("org.bepinex.plugins.KKS_PostProcessingEffectsV3")]
+    [BepInDependency("marco.kkapi", "1.35")]
+    [BepInDependency("com.bepis.bepinex.extendedsave", "16.8.1")]
     public class PPEExtended : BaseUnityPlugin
     {
+        public const string GUID = "com.user.ppe_extended";
+        public const string Version = "2.1.0";
+        private const string PresetFolderName = "PPE_Extended_Presets";
+        private const string SceneDataKey = "ppe_ext_cfg";
+
         private static Harmony _harmony;
+        private static BepInEx.Logging.ManualLogSource _log;
         private static Type _ppeType;
         private static PPEExtended _instance;
 
-        private static MemberInfo _aoMode, _aoModeSel, _aoFold, _aoObj, _cgFold, _lift, _gamma, _gain, _cgObj, _toneMap, _ppVolume, _ppLayer;
+        private static MemberInfo _aoMode, _aoModeSel, _aoFold, _aoObj, _cgFold, _lift, _gamma, _gain, _cgObj, _toneMap, _ppVolume, _ppLayer, _onoff, _cgEnable;
 
         // New effects
         private static AutoExposure _autoExposure;
@@ -38,7 +51,29 @@ namespace PPE_Extended
         private static PostProcessProfile _boundProfile;
         private static PostProcessLayer _boundLayer;
         private static Camera _boundCamera;
+        private static Camera _ssrPathCamera;
+        private static RenderingPath _ssrOriginalPath;
+        private static bool _ssrPathOverridden;
         private static float _nextDiagnosticTime;
+        private static bool _postfixSeen;
+        private static bool _tickSeen;
+        private static float _nextWaitLog;
+
+        // Ownership edge tracking: release our overrides once when a master switch turns off.
+        private static bool _mastersTracked;
+        private static bool _prevColorMaster, _prevEffectMaster, _prevCameraMaster;
+
+        // Curves are rebuilt only when their config changes or the bound ColorGrading changes.
+        private static bool _curvesDirty = true;
+        private static ColorGrading _curvesAppliedTo;
+
+        // Presets tab state
+        private static string _presetName = "";
+        private static string _presetStatus = "";
+        private static string _presetPendingDelete;
+        private static string[] _presetFiles = new string[0];
+        private static bool _presetListLoaded;
+        private static Dictionary<string, ConfigEntryBase> _entriesByKey;
 
         // MSVO
         public static ConfigEntry<float> MSVOthickness, MSVOdirectLight, MSVOnoiseTol, MSVOblurTol, MSVOupsampleTol;
@@ -61,6 +96,7 @@ namespace PPE_Extended
 
         // SSR
         public static ConfigEntry<bool> SSRenable;
+        public static ConfigEntry<bool> SSRForceDeferred;
         public static ConfigEntry<int> SSRpreset;
         public static ConfigEntry<float> SSRthickness, SSRmaxDist, SSRdistFade, SSRvignette, SSRiterations;
         public static ConfigEntry<int> SSRresolution;
@@ -116,6 +152,16 @@ namespace PPE_Extended
         public static ConfigEntry<bool> EnableEffectOverrides;
         public static ConfigEntry<bool> EnableCameraOverrides;
         public static ConfigEntry<bool> UnifiedPanelMode;
+        public static ConfigEntry<bool> VerboseDiagnostics;
+        public static ConfigEntry<bool> CopyOriginalOnOwnership;
+
+        // HDR-safe secondary curves: the only curves PPSv2 applies in HighDefinitionRange mode.
+        // 8 hue bands for Hue-vs-Sat / Hue-vs-Hue, 3 points for Lum-vs-Sat / Sat-vs-Sat.
+        const int HueBandCount = 8;
+        static readonly string[] HueBandNames = { "Red", "Orange", "Yellow", "Green", "Cyan", "Blue", "Purple", "Magenta" };
+        static readonly float[] HueBandPos = { 0f, 30f / 360f, 60f / 360f, 120f / 360f, 180f / 360f, 240f / 360f, 270f / 360f, 300f / 360f };
+        public static ConfigEntry<float>[] HueSat, HueHue;
+        public static ConfigEntry<float> LumSatShadows, LumSatMid, LumSatHigh, SatSatLow, SatSatMid, SatSatHigh;
 
         // UI
         public static ConfigEntry<float> UIScale;
@@ -130,6 +176,7 @@ namespace PPE_Extended
         private void Awake()
         {
             _instance = this;
+            _log = Logger;
             _windowId = new System.Random().Next(10000, 99999);
 
             MSVOthickness = Cfg("MSVO", "Thickness", 1.5f);
@@ -146,6 +193,20 @@ namespace PPE_Extended
             CurveRedOff = CfgR("Curves", "RedOffset", 0f, -0.2f, 0.2f);
             CurveGreenOff = CfgR("Curves", "GreenOffset", 0f, -0.2f, 0.2f);
             CurveBlueOff = CfgR("Curves", "BlueOffset", 0f, -0.2f, 0.2f);
+
+            HueSat = new ConfigEntry<float>[HueBandCount];
+            HueHue = new ConfigEntry<float>[HueBandCount];
+            for (int i = 0; i < HueBandCount; i++)
+            {
+                HueSat[i] = CfgR("HdrCurves", "HueVsSat_" + HueBandNames[i], 0f, -1f, 1f);
+                HueHue[i] = CfgR("HdrCurves", "HueVsHue_" + HueBandNames[i], 0f, -60f, 60f);
+            }
+            LumSatShadows = CfgR("HdrCurves", "LumVsSat_Shadows", 0f, -1f, 1f);
+            LumSatMid = CfgR("HdrCurves", "LumVsSat_Midtones", 0f, -1f, 1f);
+            LumSatHigh = CfgR("HdrCurves", "LumVsSat_Highlights", 0f, -1f, 1f);
+            SatSatLow = CfgR("HdrCurves", "SatVsSat_LowSat", 0f, -1f, 1f);
+            SatSatMid = CfgR("HdrCurves", "SatVsSat_MidSat", 0f, -1f, 1f);
+            SatSatHigh = CfgR("HdrCurves", "SatVsSat_HighSat", 0f, -1f, 1f);
 
             MixRR = CfgR("Mixer", "R_R", 1f, -2f, 2f); MixRG = CfgR("Mixer", "R_G", 0f, -2f, 2f); MixRB = CfgR("Mixer", "R_B", 0f, -2f, 2f);
             MixGR = CfgR("Mixer", "G_R", 0f, -2f, 2f); MixGG = CfgR("Mixer", "G_G", 1f, -2f, 2f); MixGB = CfgR("Mixer", "G_B", 0f, -2f, 2f);
@@ -169,20 +230,26 @@ namespace PPE_Extended
             AEfilterMax = CfgR("AutoExposure", "FilterMax", 5f, 0f, 10f);
 
             SSRenable = CfgB("SSR", "Enable", false);
-            SSRpreset = Config.Bind("SSR", "Preset", 2, "0=Lowest 1=Low 2=Medium 3=High 4=Ultra 5=Overkill");
-            SSRthickness = CfgR("SSR", "Thickness", 0.1f, 0.01f, 1f);
+            SSRForceDeferred = CfgB("SSR", "ForceDeferredForSSR", false);
+            SSRpreset = Config.Bind("SSR", "Preset", 2, "0=Lower 1=Low 2=Medium 3=High 4=Higher 5=Ultra 6=Overkill 7=Custom");
+            SSRthickness = CfgR("SSR", "Thickness", 8f, 1f, 64f);
             SSRmaxDist = CfgR("SSR", "MaxMarchDistance", 50f, 1f, 200f);
-            SSRdistFade = CfgR("SSR", "DistanceFade", 1f, 0f, 10f);
-            SSRvignette = CfgR("SSR", "Vignette", 0.5f, 0f, 2f);
-            SSRiterations = CfgR("SSR", "MaxIterations", 16f, 4f, 64f);
-            SSRresolution = Config.Bind("SSR", "Resolution", 1, "0=Quarter 1=Half 2=Full");
+            SSRdistFade = CfgR("SSR", "DistanceFade", 0.5f, 0f, 1f);
+            SSRvignette = CfgR("SSR", "Vignette", 0.5f, 0f, 1f);
+            SSRiterations = CfgR("SSR", "MaxIterations", 32f, 4f, 256f);
+            SSRresolution = Config.Bind("SSR", "Resolution", 1, "0=Downsampled 1=FullSize 2=Supersampled");
+            // Migrate values written by pre-2.1 builds into the PPSv2 ranges.
+            if (SSRthickness.Value < 1f) SSRthickness.Value = 8f;
+            SSRdistFade.Value = Mathf.Clamp01(SSRdistFade.Value);
+            SSRvignette.Value = Mathf.Clamp01(SSRvignette.Value);
+            SSRiterations.Value = Mathf.Clamp(SSRiterations.Value, 4f, 256f);
 
             // Bloom
             BloomEnable = CfgB("Bloom", "Enable", false);
             BloomIntensity = CfgR("Bloom", "Intensity", 0.5f, 0f, 10f);
             BloomThreshold = CfgR("Bloom", "Threshold", 1.1f, 0f, 4f);
             BloomSoftKnee = CfgR("Bloom", "SoftKnee", 0.5f, 0f, 1f);
-            BloomClamp = CfgR("Bloom", "Clamp", 6.5f, 0f, 20f);
+            BloomClamp = CfgR("Bloom", "Clamp", 65472f, 0f, 65472f);
             BloomDiffusion = CfgR("Bloom", "Diffusion", 7f, 1f, 20f);
             BloomAnamorphic = CfgR("Bloom", "AnamorphicRatio", 0f, -1f, 1f);
             BloomFastMode = CfgB("Bloom", "FastMode", false);
@@ -261,6 +328,15 @@ namespace PPE_Extended
             EnableEffectOverrides = CfgB("General", "EnableEffectOverrides", false);
             EnableCameraOverrides = CfgB("General", "EnableCameraOverrides", false);
             UnifiedPanelMode = CfgB("General", "UnifiedPanelMode", false);
+            VerboseDiagnostics = CfgB("General", "VerboseDiagnostics", false);
+            CopyOriginalOnOwnership = CfgB("General", "CopyOriginalOnOwnership", true);
+
+            _entriesByKey = new Dictionary<string, ConfigEntryBase>();
+            foreach (var kv in Config) _entriesByKey[kv.Key.Section + "." + kv.Key.Key] = kv.Value;
+            Config.SettingChanged += (s, e) =>
+            {
+                if (e.ChangedSetting != null && (e.ChangedSetting.Definition.Section == "Curves" || e.ChangedSetting.Definition.Section == "HdrCurves")) _curvesDirty = true;
+            };
 
             _ppeType = AccessTools.TypeByName("PostProcessingEffectsV3.PostProcessingEffectsV3");
             if (_ppeType == null) { Logger.LogError("PPE type not found"); return; }
@@ -270,12 +346,26 @@ namespace PPE_Extended
             _cgFold = GM(_ppeType, "CGb"); _cgObj = GM(_ppeType, "CG");
             _lift = GM(_ppeType, "CGlift"); _gamma = GM(_ppeType, "CGgamma"); _gain = GM(_ppeType, "CGgain");
             _toneMap = GM(_ppeType, "CGtoneMapper"); _ppVolume = GM(_ppeType, "postProcessVolume"); _ppLayer = GM(_ppeType, "postProcessLayer");
+            _onoff = GM(_ppeType, "onoff");
+            _cgEnable = GM(_ppeType, "CGenable");
+            Logger.LogInfo("[PPE Ext] Members: volume=" + (_ppVolume != null) + " layer=" + (_ppLayer != null) + " cg=" + (_cgObj != null) + " ao=" + (_aoObj != null) + " onoff=" + (_onoff != null));
 
             _harmony = new Harmony("com.user.ppe_extended");
             var upd = AccessTools.Method(_ppeType, "Update");
             if (upd != null) _harmony.Patch(upd, postfix: new HarmonyMethod(typeof(PPEExtended), nameof(UpdatePostfix)));
+            Logger.LogInfo("[PPE Ext] Update patched: " + (upd != null));
             var originalGui = AccessTools.Method(_ppeType, "OnGUI");
             if (originalGui != null) _harmony.Patch(originalGui, prefix: new HarmonyMethod(typeof(PPEExtended), nameof(OriginalOnGUIPrefix)));
+
+            try
+            {
+                if (KKAPI.Studio.StudioAPI.InsideStudio)
+                {
+                    KKAPI.Studio.SaveLoad.StudioSaveLoadApi.RegisterExtraBehaviour<PpeExtSceneController>(GUID);
+                    Logger.LogInfo("[PPE Ext] Scene save/load controller registered");
+                }
+            }
+            catch (Exception e) { Logger.LogWarning("[PPE Ext] Scene controller registration failed: " + e.Message); }
 
             // Detect render path (logging only, does not disable anything)
             try
@@ -297,17 +387,26 @@ namespace PPE_Extended
                 Logger.LogWarning("[PPE Ext] Render path detection failed: " + e.Message);
             }
 
-            Logger.LogInfo("PPE Extended v2.0.0 loaded - Ctrl+P to open panel");
+            Logger.LogInfo("PPE Extended v" + Version + " loaded - Ctrl+P to open panel");
         }
 
-        private void Update() { if (ToggleKey.Value.IsDown()) _showWindow = !_showWindow; }
+        private void Update()
+        {
+            if (ToggleKey.Value.IsDown()) _showWindow = !_showWindow;
+            // Drive the per-frame work from our own Update instead of a Harmony postfix on the
+            // original's Update: the original only writes on changes, so ordering is irrelevant,
+            // and this keeps working even if patches on the original never fire.
+            var bound = _boundPpe as UnityEngine.Object;
+            object ppe = (bound != null) ? _boundPpe : GetPPE();
+            if (ppe != null) Tick(ppe);
+        }
 
         private void OnGUI()
         {
             if (!_showWindow) return;
             float s = UIScale.Value;
             GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(s, s, 1f));
-            _windowRect = GUILayout.Window(_windowId, _windowRect, DrawWindow, "PPE Full PPSv2 Color Panel v2.0.4  [Ctrl+P]", GUILayout.Width(360));
+            _windowRect = GUILayout.Window(_windowId, _windowRect, DrawWindow, "PPE Extended v" + Version + "  [Ctrl+P]", GUILayout.Width(360));
             GUI.matrix = Matrix4x4.identity;
         }
 
@@ -322,6 +421,7 @@ namespace PPE_Extended
             UIScale.Value = GUILayout.HorizontalSlider(UIScale.Value, 0.5f, 2f, GUILayout.Width(150));
             GUILayout.Label(UIScale.Value.ToString("F1") + "x", GUILayout.Width(35));
             GUILayout.EndHorizontal();
+            GUILayout.Label(StatusLine(ppe), GUILayout.Width(340));
             GUILayout.Space(3);
 
             bool co = GUILayout.Toggle(EnableColorOverrides.Value, "  Enable Color Overrides (Curves/Mixer/CustomTone)");
@@ -343,14 +443,24 @@ namespace PPE_Extended
                 EnableCameraOverrides.Value = true;
                 GUILayout.Label("Unified mode: PPE Extended is the single standard PPSv2 controller", GUILayout.Width(340));
             }
+            bool copyOn = GUILayout.Toggle(CopyOriginalOnOwnership.Value, "  Start ownership from the original PPE's current values");
+            if (copyOn != CopyOriginalOnOwnership.Value) CopyOriginalOnOwnership.Value = copyOn;
+            if (GUILayout.Button("Copy Current Original PPE Values Into This Panel", GUILayout.Height(24)))
+            {
+                CopyEffectsFromOriginal();
+                CopyCameraFromOriginal();
+            }
+            GUILayout.Space(2);
+            if (GUILayout.Button("Return Control to Original PPE (release our overrides)", GUILayout.Height(28)))
+                ReturnControlToOriginal(ppe);
             GUILayout.Space(3);
 
-            string[] tabs = { "Trackballs", "Curves", "Mixer", "CustomTone", "Bloom", "DoF", "Grain", "Lens", "CA", "Blur", "Vignette", "SSR", "MSVO", "AutoExp", "AA", "Fog" };
-            _tab = GUILayout.SelectionGrid(_tab, tabs, 8, GUI.skin.button);
+            string[] tabs = { "Trackballs", "Curves", "Mixer", "CustomTone", "Bloom", "DoF", "Grain", "Lens", "CA", "Blur", "Vignette", "SSR", "MSVO", "AutoExp", "AA", "Fog", "Presets" };
+            _tab = GUILayout.SelectionGrid(_tab, tabs, 6, GUI.skin.button);
 
             if (_tab == 0) DrawTrackballs(ppe);
-            else if (_tab == 1) DrawCurves();
-            else if (_tab == 2) DrawMixer();
+            else if (_tab == 1) DrawCurves(ppe);
+            else if (_tab == 2) DrawMixer(ppe);
             else if (_tab == 3) DrawCustomTone(ppe);
             else if (_tab == 4) DrawBloom();
             else if (_tab == 5) DrawDoF();
@@ -364,6 +474,7 @@ namespace PPE_Extended
             else if (_tab == 13) DrawAutoExposure();
             else if (_tab == 14) DrawAntiAliasing();
             else if (_tab == 15) DrawFog();
+            else if (_tab == 16) DrawPresets();
 
             GUILayout.Space(8);
             GUILayout.EndScrollView();
@@ -373,6 +484,7 @@ namespace PPE_Extended
         void DrawTrackballs(object ppe)
         {
             Section("Trackballs", "Lift=Shadows  Gamma=Midtones  Gain=Highlights");
+            DrawColorGradingHint(ppe);
             TB("Lift (Shadows)", _lift, ppe);
             TB("Gamma (Midtones)", _gamma, ppe);
             TB("Gain (Highlights)", _gain, ppe);
@@ -381,9 +493,33 @@ namespace PPE_Extended
                     "Cinematic", () => { SV4(_lift, ppe, V4(0.92f,0.96f,1.05f,-0.04f)); SV4(_gamma, ppe, V4(1.03f,1.01f,0.97f,0.03f)); SV4(_gain, ppe, V4(1.02f,1f,0.98f,-0.02f)); });
         }
 
-        void DrawCurves()
+        void DrawCurves(object ppe)
         {
-            Section("Color Curves", "Master curve controls overall contrast, RGB offset for white balance");
+            var cg = _cgObj != null ? GMV(_cgObj, ppe) as ColorGrading : null;
+            bool hdr = cg == null || cg.gradingMode == null || cg.gradingMode.value != GradingMode.LowDefinitionRange;
+            Section("Curves", hdr
+                ? "HDR grading: PPSv2 applies only the Hue/Sat/Lum curves below. Master/RGB curves are LDR-only."
+                : "LDR grading: all curves below are active.");
+            DrawColorGradingHint(ppe);
+            SubSection("Hue vs Saturation  (-1 = gray, +1 = double)");
+            for (int i = 0; i < HueBandCount; i++) Slider(HueBandNames[i], -1f, 1f, HueSat[i]);
+            SubSection("Hue vs Hue  (shift in degrees)");
+            for (int i = 0; i < HueBandCount; i++) Slider(HueBandNames[i], -60f, 60f, HueHue[i]);
+            SubSection("Luminance vs Saturation");
+            Slider("Shadows", -1f, 1f, LumSatShadows);
+            Slider("Midtones", -1f, 1f, LumSatMid);
+            Slider("Highlights", -1f, 1f, LumSatHigh);
+            SubSection("Saturation vs Saturation");
+            Slider("Low Sat", -1f, 1f, SatSatLow);
+            Slider("Mid Sat", -1f, 1f, SatSatMid);
+            Slider("High Sat", -1f, 1f, SatSatHigh);
+            OneBtn("Reset Hue/Sat/Lum Curves", () =>
+            {
+                for (int i = 0; i < HueBandCount; i++) { HueSat[i].Value = 0f; HueHue[i].Value = 0f; }
+                LumSatShadows.Value = 0f; LumSatMid.Value = 0f; LumSatHigh.Value = 0f;
+                SatSatLow.Value = 0f; SatSatMid.Value = 0f; SatSatHigh.Value = 0f;
+            });
+            SubSection(hdr ? "Master / RGB curves (LDR mode only - no effect while HDR)" : "Master / RGB curves");
             string[] ps = { "Linear (Default)", "S-Curve (Contrast)", "Strong Contrast", "Film Shoulder", "Faded Matte" };
             CurvePreset.Value = GUILayout.SelectionGrid(CurvePreset.Value, ps, 1, GUI.skin.toggle);
             Slider("Curve Strength", 0, 1, CurveStrength);
@@ -396,9 +532,10 @@ namespace PPE_Extended
             OneBtn("Reset to Linear", () => { CurvePreset.Value=0; CurveStrength.Value=0.5f; CurveBlackLift.Value=0; CurveWhiteCrush.Value=1; CurveRedOff.Value=0; CurveGreenOff.Value=0; CurveBlueOff.Value=0; });
         }
 
-        void DrawMixer()
+        void DrawMixer(object ppe)
         {
             Section("Color Mixer", "Adjust each output channel RGB input, essential for skin tone / split toning");
+            DrawColorGradingHint(ppe);
             SubSection("Red Output");
             Slider("Red <- Red", -2, 2, MixRR); Slider("Red <- Green", -2, 2, MixRG); Slider("Red <- Blue", -2, 2, MixRB);
             SubSection("Green Output");
@@ -413,6 +550,9 @@ namespace PPE_Extended
             Section("Custom Tonemapping", "Set Tonemapper to Custom in PPE panel to take effect");
             var tm = (Tonemapper)GCV(_toneMap, ppe);
             if (tm != Tonemapper.Custom) GUILayout.Label("Current Tonemapper: " + tm + " (set to Custom)", GUILayout.Width(320));
+            DrawColorGradingHint(ppe);
+            if (tm != Tonemapper.Custom && GUILayout.Button("Set Original Tonemapper to Custom", GUILayout.Height(24)))
+                SCV(_toneMap, ppe, Tonemapper.Custom);
             Slider("Toe Strength", 0, 1, CTtoeS);
             Slider("Toe Length", 0, 1, CTtoeL);
             Slider("Shoulder Strength", 0, 1, CTshS);
@@ -457,7 +597,18 @@ namespace PPE_Extended
 
         void DrawSSR()
         {
-            Section("Screen Space Reflections", "PPSv2 standard effect, requires Forward rendering path");
+            Section("Screen Space Reflections", "PPSv2 SSR requires a Deferred G-buffer; KKS normally uses Forward rendering");
+            var activePath = _boundCamera != null ? _boundCamera.actualRenderingPath : RenderingPath.UsePlayerSettings;
+            if (_boundCamera != null)
+                GUILayout.Label("Camera path: " + activePath, GUILayout.Width(320));
+            bool forceDeferred = GUILayout.Toggle(SSRForceDeferred.Value, "  Force Deferred path while SSR is enabled");
+            if (forceDeferred != SSRForceDeferred.Value)
+            {
+                SSRForceDeferred.Value = forceDeferred;
+                if (!forceDeferred) ReleaseSSRRenderingPath();
+            }
+            if (activePath != RenderingPath.DeferredShading && !SSRForceDeferred.Value)
+                GUILayout.Label("SSR is unavailable in Forward mode. Enable the option above to test Deferred.", GUILayout.Width(320));
             if (!_ssrAvailable)
             {
                 GUILayout.Label("Not initialized, click button below (first time only)", GUILayout.Width(320));
@@ -472,15 +623,19 @@ namespace PPE_Extended
             if (newVal != SSRenable.Value) SSRenable.Value = newVal;
             if (SSRenable.Value)
             {
-                string[] ps = { "Lowest", "Low", "Medium", "High", "Ultra", "Overkill" };
-                SSRpreset.Value = GUILayout.SelectionGrid(SSRpreset.Value, ps, 3, GUI.skin.toggle);
+                string[] ps = { "Lower", "Low", "Medium", "High", "Higher", "Ultra", "Overkill", "Custom" };
+                SSRpreset.Value = Mathf.Clamp(GUILayout.SelectionGrid(Mathf.Clamp(SSRpreset.Value, 0, 7), ps, 4, GUI.skin.toggle), 0, 7);
                 string[] rs = { "Downsampled", "Full Size", "Supersampled" };
-                SSRresolution.Value = GUILayout.SelectionGrid(SSRresolution.Value, rs, 3, GUI.skin.toggle);
-                Slider("Thickness", 0.01f, 1, SSRthickness);
+                SSRresolution.Value = Mathf.Clamp(GUILayout.SelectionGrid(Mathf.Clamp(SSRresolution.Value, 0, 2), rs, 3, GUI.skin.toggle), 0, 2);
+                if (SSRpreset.Value == 7)
+                    Slider("Thickness", 1f, 64f, SSRthickness);
                 Slider("Max March Distance", 1, 200, SSRmaxDist);
-                Slider("Distance Fade", 0, 10, SSRdistFade);
-                Slider("Vignette", 0, 2, SSRvignette);
-                Slider("Max Iterations", 4, 64, SSRiterations);
+                if (SSRpreset.Value == 7)
+                {
+                    Slider("Distance Fade", 0, 1, SSRdistFade);
+                    Slider("Vignette", 0, 1, SSRvignette);
+                    Slider("Max Iterations", 4, 256, SSRiterations);
+                }
             }
         }
 
@@ -556,7 +711,7 @@ namespace PPE_Extended
                 Slider("Intensity", 0, 10, BloomIntensity);
                 Slider("Threshold", 0, 4, BloomThreshold);
                 Slider("Soft Knee", 0, 1, BloomSoftKnee);
-                Slider("Clamp", 0, 20, BloomClamp);
+                Slider("Clamp", 0, 65472, BloomClamp);
                 Slider("Diffusion", 1, 20, BloomDiffusion);
                 Slider("Anamorphic Ratio", -1, 1, BloomAnamorphic);
                 BloomFastMode.Value = GUILayout.Toggle(BloomFastMode.Value, "  Fast Mode (lower quality)");
@@ -660,32 +815,32 @@ namespace PPE_Extended
             }
         }
 
+        // Diagnostic only: records whether Harmony patches on the original Update fire at all.
         static void UpdatePostfix(object __instance)
+        {
+            if (!_postfixSeen) { _postfixSeen = true; _log.LogInfo("[PPE Ext] Harmony postfix on original Update fired"); }
+        }
+
+        static void Tick(object ppe)
         {
             try
             {
+                if (!_tickSeen) { _tickSeen = true; _log.LogInfo("[PPE Ext] Tick running from own Update"); }
                 // KKS recreates its volume when a Studio scene changes. Rebind by
                 // profile identity so values reach the active render path.
-                if (!RefreshBinding(__instance)) return;
+                if (!RefreshBinding(ppe)) return;
+                HandleMasterEdges(ppe);
 
                 if (EnableCameraOverrides.Value)
                 {
-                    try { ApplyAntiAliasing(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] AntiAliasing: " + e.Message); }
-                    try { ApplyFog(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Fog: " + e.Message); }
+                    try { ApplyAntiAliasing(); } catch (Exception e) { _log.LogWarning("[PPE Ext] AntiAliasing: " + e.Message); }
+                    try { ApplyFog(); } catch (Exception e) { _log.LogWarning("[PPE Ext] Fog: " + e.Message); }
                 }
                 if (_aeAvailable)
-                    try
-                    {
-                        // Exposure is opt-in. More importantly, release the PPSv2
-                        // override when the camera master switch is off so a
-                        // previous session cannot leave the scene nearly black.
-                        if (EnableCameraOverrides.Value) ApplyAutoExposure();
-                        else ReleaseAutoExposure();
-                    }
-                    catch (Exception e) { Debug.LogWarning("[PPE Ext] AutoExposure: " + e.Message); _aeAvailable = false; }
+                    try { ApplyAutoExposure(); } catch (Exception e) { _log.LogWarning("[PPE Ext] AutoExposure: " + e.Message); _aeAvailable = false; }
 
                 // MSVO
-                var ao = (AmbientOcclusion)GMV(_aoObj, __instance);
+                var ao = (AmbientOcclusion)GMV(_aoObj, ppe);
                 if (ao != null && ao.enabled.value && ao.mode.value == AmbientOcclusionMode.MultiScaleVolumetricObscurance)
                 {
                     ao.thicknessModifier.Override(MSVOthickness.Value);
@@ -697,7 +852,7 @@ namespace PPE_Extended
                 }
 
                 // ColorGrading — only override when user explicitly enables color overrides
-                var cg = (ColorGrading)GMV(_cgObj, __instance);
+                var cg = (ColorGrading)GMV(_cgObj, ppe);
                 if (cg != null && cg.enabled.value && EnableColorOverrides.Value)
                 {
                     ApplyCurves(cg);
@@ -710,10 +865,6 @@ namespace PPE_Extended
                         cg.toneCurveShoulderStrength.Override(CTshS.Value); cg.toneCurveShoulderLength.Override(CTshL.Value);
                         cg.toneCurveShoulderAngle.Override(CTshA.Value); cg.toneCurveGamma.Override(CTgamma.Value);
                     }
-                }
-                else if (cg != null)
-                {
-                    ReleaseColorOverrides(cg);
                 }
 
                 // SSR (only init when user enables manually, avoids D3D crash on startup)
@@ -734,28 +885,24 @@ namespace PPE_Extended
                         if (_ssrAvailable && _ssr != null)
                         {
                             try { ApplySSR(); }
-                            catch (Exception e) { Debug.LogWarning("[PPE Ext] SSR apply error: " + e.Message); _ssrAvailable = false; }
+                            catch (Exception e) { _log.LogWarning("[PPE Ext] SSR apply error: " + e.Message); _ssrAvailable = false; }
                         }
 
                         // Only write effect parameters in explicit ownership mode.
-                        try { ApplyBloom(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Bloom: " + e.Message); }
-                        try { ApplyDoF(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] DoF: " + e.Message); }
-                        try { ApplyGrain(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Grain: " + e.Message); }
-                        try { ApplyLensDistortion(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] LensDist: " + e.Message); }
-                        try { ApplyCA(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] CA: " + e.Message); }
-                        try { ApplyMotionBlur(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] MotionBlur: " + e.Message); }
-                        try { ApplyVignette(); } catch (Exception e) { Debug.LogWarning("[PPE Ext] Vignette: " + e.Message); }
-                    }
-                    else
-                    {
-                        ReleaseEffectOverrides();
+                        try { ApplyBloom(); } catch (Exception e) { _log.LogWarning("[PPE Ext] Bloom: " + e.Message); }
+                        try { ApplyDoF(); } catch (Exception e) { _log.LogWarning("[PPE Ext] DoF: " + e.Message); }
+                        try { ApplyGrain(); } catch (Exception e) { _log.LogWarning("[PPE Ext] Grain: " + e.Message); }
+                        try { ApplyLensDistortion(); } catch (Exception e) { _log.LogWarning("[PPE Ext] LensDist: " + e.Message); }
+                        try { ApplyCA(); } catch (Exception e) { _log.LogWarning("[PPE Ext] CA: " + e.Message); }
+                        try { ApplyMotionBlur(); } catch (Exception e) { _log.LogWarning("[PPE Ext] MotionBlur: " + e.Message); }
+                        try { ApplyVignette(); } catch (Exception e) { _log.LogWarning("[PPE Ext] Vignette: " + e.Message); }
                     }
                 }
-                EmitDiagnosticsIfDue();
+                if (VerboseDiagnostics.Value) EmitDiagnosticsIfDue();
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[PPE Ext] UpdatePostfix error: " + e.Message);
+                _log.LogWarning("[PPE Ext] Tick error: " + e.Message);
             }
         }
 
@@ -775,7 +922,16 @@ namespace PPE_Extended
                 var layer = (PostProcessLayer)GMV(_ppLayer, ppe);
                 var camera = Camera.main;
                 var profile = volume != null ? volume.profile : null;
-                if (volume == null || profile == null) return false;
+                if (volume == null || profile == null)
+                {
+                    if (Time.unscaledTime >= _nextWaitLog)
+                    {
+                        _nextWaitLog = Time.unscaledTime + 5f;
+                        var on = _onoff != null ? GCV(_onoff, ppe) : null;
+                        _log.LogInfo("[PPE Ext] Waiting for original PPE volume: volume=" + (volume == null ? "null" : "ok") + " ppeOn=" + (on ?? "?"));
+                    }
+                    return false;
+                }
 
                 bool changed = !ReferenceEquals(_boundPpe, ppe) ||
                                !ReferenceEquals(_boundVolume, volume) ||
@@ -789,16 +945,21 @@ namespace PPE_Extended
                 _boundProfile = profile;
                 _boundLayer = layer;
                 _boundCamera = camera;
+                ReleaseSSRRenderingPath();
                 _effectsTried = false;
                 _bloom = null; _dof = null; _grain = null; _lensDistortion = null;
                 _chromaticAberration = null; _motionBlur = null; _vignette = null;
                 _ssr = null; _ssrAvailable = false;
+                _curvesDirty = true; _curvesAppliedTo = null;
                 EnsureAllEffects(profile);
+                _log.LogInfo("[PPE Ext] Rebound: profile='" + profile.name + "' settings=" + profile.settings.Count +
+                          " layer=" + (layer == null ? "none" : (layer.enabled ? "enabled" : "disabled")) +
+                          " camera=" + (camera == null ? "none" : camera.name + "/" + camera.renderingPath));
                 return true;
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[PPE Ext] Binding refresh failed: " + e.Message);
+                _log.LogWarning("[PPE Ext] Binding refresh failed: " + e.Message);
                 return false;
             }
         }
@@ -811,7 +972,7 @@ namespace PPE_Extended
             {
                 var layerState = _boundLayer == null ? "none" : (_boundLayer.enabled ? "enabled" : "disabled");
                 var cameraState = _boundCamera == null ? "none" : _boundCamera.name + "/" + _boundCamera.renderingPath;
-                Debug.Log("[PPE Ext] Bound profile='" + (_boundProfile != null ? _boundProfile.name : "null") +
+                _log.LogInfo("[PPE Ext] Bound profile='" + (_boundProfile != null ? _boundProfile.name : "null") +
                           "' settings=" + (_boundProfile != null ? _boundProfile.settings.Count.ToString() : "0") +
                           " layer=" + layerState + " camera=" + cameraState +
                           " aa=" + (_boundLayer != null ? _boundLayer.antialiasingMode.ToString() : "missing") +
@@ -821,7 +982,7 @@ namespace PPE_Extended
                           " grain=" + (_grain != null && _grain.enabled != null ? _grain.enabled.value.ToString() : "missing") +
                           " vignette=" + (_vignette != null && _vignette.enabled != null ? _vignette.enabled.value.ToString() : "missing"));
             }
-            catch (Exception e) { Debug.LogWarning("[PPE Ext] Diagnostics failed: " + e.Message); }
+            catch (Exception e) { _log.LogWarning("[PPE Ext] Diagnostics failed: " + e.Message); }
         }
 
         static void TryEnsureEffects(PostProcessProfile profile)
@@ -851,13 +1012,13 @@ namespace PPE_Extended
                         _autoExposure.enabled.Override(false);
                 }
                 _aeAvailable = _autoExposure != null;
-                Debug.Log("[PPE Ext] AutoExposure initialized: " + _aeAvailable);
+                _log.LogInfo("[PPE Ext] AutoExposure initialized: " + _aeAvailable);
                 return _aeAvailable;
             }
             catch (Exception e)
             {
                 _aeAvailable = false;
-                Debug.LogWarning("[PPE Ext] AutoExposure init failed: " + e.Message);
+                _log.LogWarning("[PPE Ext] AutoExposure init failed: " + e.Message);
                 return false;
             }
         }
@@ -872,13 +1033,26 @@ namespace PPE_Extended
                 var vol = (PostProcessVolume)GMV(_ppVolume, ppe);
                 if (vol == null || vol.profile == null) return false;
 
-                // Key fix: SSR needs depth texture, PPE does not enable it by default
-                var cam = Camera.main;
-                if (cam != null)
+                var cam = _boundCamera != null ? _boundCamera : Camera.main;
+                if (cam == null) return false;
+                if (cam.actualRenderingPath != RenderingPath.DeferredShading)
                 {
-                    cam.depthTextureMode = DepthTextureMode.Depth;
-                    Debug.Log("[PPE Ext] Camera depthTextureMode set to Depth for SSR");
+                    if (!SSRForceDeferred.Value)
+                    {
+                        _log.LogWarning("[PPE Ext] SSR unavailable: camera rendering path is " + cam.actualRenderingPath + "; enable ForceDeferredForSSR to opt in.");
+                        return false;
+                    }
+                    EnsureSSRRenderingPath(cam);
+                    if (cam.actualRenderingPath != RenderingPath.DeferredShading)
+                    {
+                        _log.LogWarning("[PPE Ext] SSR force-deferred request was not accepted; actual path remains " + cam.actualRenderingPath + ".");
+                        return false;
+                    }
                 }
+
+                // Key fix: SSR needs depth texture, PPE does not enable it by default
+                cam.depthTextureMode |= DepthTextureMode.Depth | DepthTextureMode.MotionVectors;
+                _log.LogInfo("[PPE Ext] Camera depthTextureMode set to Depth+MotionVectors for SSR");
 
                 if (vol.profile.HasSettings<ScreenSpaceReflections>())
                 {
@@ -891,91 +1065,14 @@ namespace PPE_Extended
                         _ssr.enabled.Override(false);
                 }
                 _ssrAvailable = _ssr != null;
-                Debug.Log("[PPE Ext] SSR initialized: " + _ssrAvailable);
+                _log.LogInfo("[PPE Ext] SSR initialized: " + _ssrAvailable);
                 return _ssrAvailable;
             }
             catch (Exception e)
             {
                 _ssrAvailable = false;
-                Debug.LogWarning("[PPE Ext] SSR init failed: " + e.Message);
+                _log.LogWarning("[PPE Ext] SSR init failed: " + e.Message);
                 return false;
-            }
-        }
-
-        static void ClearOverride(ParameterOverride parameter)
-        {
-            if (parameter != null) parameter.overrideState = false;
-        }
-
-        static void ReleaseAutoExposure()
-        {
-            if (_autoExposure == null) return;
-            ClearOverride(_autoExposure.enabled);
-            ClearOverride(_autoExposure.eyeAdaptation);
-            ClearOverride(_autoExposure.minLuminance);
-            ClearOverride(_autoExposure.maxLuminance);
-            ClearOverride(_autoExposure.keyValue);
-            ClearOverride(_autoExposure.speedUp);
-            ClearOverride(_autoExposure.speedDown);
-            ClearOverride(_autoExposure.filtering);
-        }
-
-        static void ReleaseColorOverrides(ColorGrading cg)
-        {
-            ClearOverride(cg.masterCurve); ClearOverride(cg.redCurve);
-            ClearOverride(cg.greenCurve); ClearOverride(cg.blueCurve);
-            ClearOverride(cg.mixerRedOutRedIn); ClearOverride(cg.mixerRedOutGreenIn); ClearOverride(cg.mixerRedOutBlueIn);
-            ClearOverride(cg.mixerGreenOutRedIn); ClearOverride(cg.mixerGreenOutGreenIn); ClearOverride(cg.mixerGreenOutBlueIn);
-            ClearOverride(cg.mixerBlueOutRedIn); ClearOverride(cg.mixerBlueOutGreenIn); ClearOverride(cg.mixerBlueOutBlueIn);
-            ClearOverride(cg.toneCurveToeStrength); ClearOverride(cg.toneCurveToeLength);
-            ClearOverride(cg.toneCurveShoulderStrength); ClearOverride(cg.toneCurveShoulderLength);
-            ClearOverride(cg.toneCurveShoulderAngle); ClearOverride(cg.toneCurveGamma);
-        }
-
-        static void ReleaseEffectOverrides()
-        {
-            if (_ssr != null)
-            {
-                ClearOverride(_ssr.enabled); ClearOverride(_ssr.preset); ClearOverride(_ssr.thickness);
-                ClearOverride(_ssr.maximumMarchDistance); ClearOverride(_ssr.distanceFade);
-                ClearOverride(_ssr.vignette); ClearOverride(_ssr.maximumIterationCount); ClearOverride(_ssr.resolution);
-            }
-            if (_bloom != null)
-            {
-                ClearOverride(_bloom.enabled); ClearOverride(_bloom.intensity); ClearOverride(_bloom.threshold);
-                ClearOverride(_bloom.softKnee); ClearOverride(_bloom.clamp); ClearOverride(_bloom.diffusion);
-                ClearOverride(_bloom.anamorphicRatio); ClearOverride(_bloom.fastMode);
-                ClearOverride(_bloom.dirtIntensity); ClearOverride(_bloom.color);
-            }
-            if (_dof != null)
-            {
-                ClearOverride(_dof.enabled); ClearOverride(_dof.focusDistance); ClearOverride(_dof.aperture);
-                ClearOverride(_dof.focalLength); ClearOverride(_dof.kernelSize);
-            }
-            if (_grain != null)
-            {
-                ClearOverride(_grain.enabled); ClearOverride(_grain.intensity); ClearOverride(_grain.colored);
-                ClearOverride(_grain.size); ClearOverride(_grain.lumContrib);
-            }
-            if (_lensDistortion != null)
-            {
-                ClearOverride(_lensDistortion.enabled); ClearOverride(_lensDistortion.intensity);
-                ClearOverride(_lensDistortion.centerX); ClearOverride(_lensDistortion.centerY); ClearOverride(_lensDistortion.scale);
-            }
-            if (_chromaticAberration != null)
-            {
-                ClearOverride(_chromaticAberration.enabled); ClearOverride(_chromaticAberration.intensity);
-                ClearOverride(_chromaticAberration.fastMode);
-            }
-            if (_motionBlur != null)
-            {
-                ClearOverride(_motionBlur.enabled); ClearOverride(_motionBlur.shutterAngle); ClearOverride(_motionBlur.sampleCount);
-            }
-            if (_vignette != null)
-            {
-                ClearOverride(_vignette.enabled); ClearOverride(_vignette.mode); ClearOverride(_vignette.intensity);
-                ClearOverride(_vignette.smoothness); ClearOverride(_vignette.roundness); ClearOverride(_vignette.center);
-                ClearOverride(_vignette.rounded); ClearOverride(_vignette.opacity); ClearOverride(_vignette.color);
             }
         }
 
@@ -997,16 +1094,53 @@ namespace PPE_Extended
         static void ApplySSR()
         {
             if (_ssr.enabled == null) return;
+            var cam = _boundCamera != null ? _boundCamera : Camera.main;
+            if (SSRenable.Value && SSRForceDeferred.Value && cam != null)
+                EnsureSSRRenderingPath(cam);
             _ssr.enabled.Override(SSRenable.Value);
-            if (!SSRenable.Value) return;
+            if (!SSRenable.Value)
+            {
+                ReleaseSSRRenderingPath();
+                return;
+            }
 
-            if (_ssr.preset != null) _ssr.preset.Override((ScreenSpaceReflectionPreset)SSRpreset.Value);
-            if (_ssr.thickness != null) _ssr.thickness.Override(SSRthickness.Value);
-            if (_ssr.maximumMarchDistance != null) _ssr.maximumMarchDistance.Override(SSRmaxDist.Value);
-            if (_ssr.distanceFade != null) _ssr.distanceFade.Override(SSRdistFade.Value);
-            if (_ssr.vignette != null) _ssr.vignette.Override(SSRvignette.Value);
-            if (_ssr.maximumIterationCount != null) _ssr.maximumIterationCount.Override((int)SSRiterations.Value);
-            if (_ssr.resolution != null) _ssr.resolution.Override((ScreenSpaceReflectionResolution)SSRresolution.Value);
+            int preset = Mathf.Clamp(SSRpreset.Value, 0, 7);
+            if (_ssr.preset != null) _ssr.preset.Override((ScreenSpaceReflectionPreset)preset);
+            if (preset == 7)
+            {
+                if (_ssr.thickness != null) _ssr.thickness.Override(Mathf.Clamp(SSRthickness.Value, 1f, 64f));
+                if (_ssr.distanceFade != null) _ssr.distanceFade.Override(Mathf.Clamp01(SSRdistFade.Value));
+                if (_ssr.vignette != null) _ssr.vignette.Override(Mathf.Clamp01(SSRvignette.Value));
+                if (_ssr.maximumIterationCount != null) _ssr.maximumIterationCount.Override(Mathf.Clamp((int)SSRiterations.Value, 4, 256));
+                if (_ssr.resolution != null) _ssr.resolution.Override((ScreenSpaceReflectionResolution)Mathf.Clamp(SSRresolution.Value, 0, 2));
+            }
+            if (_ssr.maximumMarchDistance != null) _ssr.maximumMarchDistance.Override(Mathf.Max(0f, SSRmaxDist.Value));
+        }
+
+        private static void EnsureSSRRenderingPath(Camera camera)
+        {
+            if (camera == null || camera.actualRenderingPath == RenderingPath.DeferredShading) return;
+            if (!_ssrPathOverridden || _ssrPathCamera != camera)
+            {
+                _ssrPathCamera = camera;
+                _ssrOriginalPath = camera.renderingPath;
+                _ssrPathOverridden = true;
+                _log.LogInfo("[PPE Ext] SSR forcing camera rendering path " + camera.actualRenderingPath + " -> DeferredShading");
+            }
+            camera.renderingPath = RenderingPath.DeferredShading;
+            camera.depthTextureMode |= DepthTextureMode.Depth | DepthTextureMode.MotionVectors;
+        }
+
+        private static void ReleaseSSRRenderingPath()
+        {
+            if (!_ssrPathOverridden) return;
+            if (_ssrPathCamera != null)
+            {
+                _ssrPathCamera.renderingPath = _ssrOriginalPath;
+                _log.LogInfo("[PPE Ext] SSR restored camera rendering path to " + _ssrOriginalPath);
+            }
+            _ssrPathCamera = null;
+            _ssrPathOverridden = false;
         }
 
         static void ApplyAntiAliasing()
@@ -1041,11 +1175,115 @@ namespace PPE_Extended
 
         static void ApplyCurves(ColorGrading cg)
         {
-            if (cg.masterCurve?.value != null)
-                cg.masterCurve.value.curve = BuildMaster(CurvePreset.Value, CurveStrength.Value, CurveBlackLift.Value, CurveWhiteCrush.Value);
-            if (cg.redCurve?.value != null) cg.redCurve.value.curve = BuildOff(CurveRedOff.Value);
-            if (cg.greenCurve?.value != null) cg.greenCurve.value.curve = BuildOff(CurveGreenOff.Value);
-            if (cg.blueCurve?.value != null) cg.blueCurve.value.curve = BuildOff(CurveBlueOff.Value);
+            // PPSv2 only blends parameters whose overrideState is true; assigning the
+            // AnimationCurve alone (as older versions did) never reached the renderer.
+            if (_curvesDirty || !ReferenceEquals(_curvesAppliedTo, cg))
+            {
+                if (cg.masterCurve?.value != null)
+                    cg.masterCurve.value.curve = BuildMaster(CurvePreset.Value, CurveStrength.Value, CurveBlackLift.Value, CurveWhiteCrush.Value);
+                if (cg.redCurve?.value != null) cg.redCurve.value.curve = BuildOff(CurveRedOff.Value);
+                if (cg.greenCurve?.value != null) cg.greenCurve.value.curve = BuildOff(CurveGreenOff.Value);
+                if (cg.blueCurve?.value != null) cg.blueCurve.value.curve = BuildOff(CurveBlueOff.Value);
+                if (cg.hueVsSatCurve?.value != null) cg.hueVsSatCurve.value.curve = BuildHueBandCurve(HueSat, 0.5f);
+                if (cg.hueVsHueCurve?.value != null) cg.hueVsHueCurve.value.curve = BuildHueBandCurve(HueHue, 1f / 360f);
+                if (cg.lumVsSatCurve?.value != null) cg.lumVsSatCurve.value.curve = BuildThreePointCurve(LumSatShadows.Value, LumSatMid.Value, LumSatHigh.Value);
+                if (cg.satVsSatCurve?.value != null) cg.satVsSatCurve.value.curve = BuildThreePointCurve(SatSatLow.Value, SatSatMid.Value, SatSatHigh.Value);
+                _curvesDirty = false;
+                _curvesAppliedTo = cg;
+            }
+            if (cg.masterCurve != null) cg.masterCurve.overrideState = true;
+            if (cg.redCurve != null) cg.redCurve.overrideState = true;
+            if (cg.greenCurve != null) cg.greenCurve.overrideState = true;
+            if (cg.blueCurve != null) cg.blueCurve.overrideState = true;
+            if (cg.hueVsSatCurve != null) cg.hueVsSatCurve.overrideState = true;
+            if (cg.hueVsHueCurve != null) cg.hueVsHueCurve.overrideState = true;
+            if (cg.lumVsSatCurve != null) cg.lumVsSatCurve.overrideState = true;
+            if (cg.satVsSatCurve != null) cg.satVsSatCurve.overrideState = true;
+        }
+
+        // The original PPE writes its overrides only from Settings() (setup / any of its
+        // config values changing), so once we stop writing, our last values would stay
+        // baked into the shared profile. On a falling edge of a master switch we clear
+        // exactly the parameters we own and ask the original to re-apply its own.
+        static void HandleMasterEdges(object ppe)
+        {
+            bool color = EnableColorOverrides.Value, effect = EnableEffectOverrides.Value, camera = EnableCameraOverrides.Value;
+            if (!_mastersTracked)
+            {
+                _mastersTracked = true;
+                _prevColorMaster = color; _prevEffectMaster = effect; _prevCameraMaster = camera;
+                return;
+            }
+            bool released = false;
+            if (_prevColorMaster && !color) { ReleaseColorGroup(ppe); released = true; }
+            if (_prevEffectMaster && !effect) { ReleaseEffectGroup(); released = true; }
+            if (_prevCameraMaster && !camera) released = true; // AA/Fog are plain fields; the original re-applies them
+            if (!_prevColorMaster && color) { _curvesDirty = true; EnsureOriginalColorGrading(ppe); }
+            if (!_prevEffectMaster && effect && CopyOriginalOnOwnership.Value) CopyEffectsFromOriginal();
+            if (!_prevCameraMaster && camera && CopyOriginalOnOwnership.Value) CopyCameraFromOriginal();
+            _prevColorMaster = color; _prevEffectMaster = effect; _prevCameraMaster = camera;
+            if (released) InvokeOriginalSettings(ppe);
+        }
+
+        static void ReturnControlToOriginal(object ppe)
+        {
+            UnifiedPanelMode.Value = false;
+            EnableColorOverrides.Value = false;
+            EnableEffectOverrides.Value = false;
+            EnableCameraOverrides.Value = false;
+            HandleMasterEdges(ppe);
+        }
+
+        static void InvokeOriginalSettings(object ppe)
+        {
+            try
+            {
+                var m = AccessTools.Method(_ppeType, "Settings");
+                if (m == null || ppe == null) return;
+                m.Invoke(ppe, null);
+                _log.LogInfo("[PPE Ext] Released our overrides; original PPE Settings() re-applied");
+            }
+            catch (Exception e) { _log.LogWarning("[PPE Ext] Original Settings() invoke failed: " + e.Message); }
+        }
+
+        static void Release(ParameterOverride p) { if (p != null) p.overrideState = false; }
+
+        static void ReleaseColorGroup(object ppe)
+        {
+            var cg = (_cgObj != null && ppe != null) ? GMV(_cgObj, ppe) as ColorGrading : null;
+            if (cg == null) return;
+            Release(cg.masterCurve); Release(cg.redCurve); Release(cg.greenCurve); Release(cg.blueCurve);
+            Release(cg.hueVsSatCurve); Release(cg.hueVsHueCurve); Release(cg.lumVsSatCurve); Release(cg.satVsSatCurve);
+            Release(cg.mixerRedOutRedIn); Release(cg.mixerRedOutGreenIn); Release(cg.mixerRedOutBlueIn);
+            Release(cg.mixerGreenOutRedIn); Release(cg.mixerGreenOutGreenIn); Release(cg.mixerGreenOutBlueIn);
+            Release(cg.mixerBlueOutRedIn); Release(cg.mixerBlueOutGreenIn); Release(cg.mixerBlueOutBlueIn);
+            Release(cg.toneCurveToeStrength); Release(cg.toneCurveToeLength);
+            Release(cg.toneCurveShoulderStrength); Release(cg.toneCurveShoulderLength);
+            Release(cg.toneCurveShoulderAngle); Release(cg.toneCurveGamma);
+        }
+
+        static void ReleaseEffectGroup()
+        {
+            if (_ssr != null)
+            {
+                Release(_ssr.enabled); Release(_ssr.preset); Release(_ssr.thickness); Release(_ssr.maximumMarchDistance);
+                Release(_ssr.distanceFade); Release(_ssr.vignette); Release(_ssr.maximumIterationCount); Release(_ssr.resolution);
+            }
+            if (_bloom != null)
+            {
+                Release(_bloom.enabled); Release(_bloom.intensity); Release(_bloom.threshold); Release(_bloom.softKnee); Release(_bloom.clamp);
+                Release(_bloom.diffusion); Release(_bloom.anamorphicRatio); Release(_bloom.fastMode); Release(_bloom.dirtIntensity); Release(_bloom.color);
+            }
+            if (_dof != null) { Release(_dof.enabled); Release(_dof.focusDistance); Release(_dof.aperture); Release(_dof.focalLength); Release(_dof.kernelSize); }
+            if (_grain != null) { Release(_grain.enabled); Release(_grain.intensity); Release(_grain.colored); Release(_grain.size); Release(_grain.lumContrib); }
+            if (_lensDistortion != null) { Release(_lensDistortion.enabled); Release(_lensDistortion.intensity); Release(_lensDistortion.centerX); Release(_lensDistortion.centerY); Release(_lensDistortion.scale); }
+            if (_chromaticAberration != null) { Release(_chromaticAberration.enabled); Release(_chromaticAberration.intensity); Release(_chromaticAberration.fastMode); }
+            if (_motionBlur != null) { Release(_motionBlur.enabled); Release(_motionBlur.shutterAngle); Release(_motionBlur.sampleCount); }
+            if (_vignette != null)
+            {
+                Release(_vignette.enabled); Release(_vignette.mode); Release(_vignette.intensity); Release(_vignette.smoothness); Release(_vignette.roundness);
+                Release(_vignette.center); Release(_vignette.rounded); Release(_vignette.opacity); Release(_vignette.color);
+            }
         }
 
         static void EnsureAllEffects(PostProcessProfile profile)
@@ -1075,11 +1313,11 @@ namespace PPE_Extended
                 if (!profile.HasSettings<Vignette>()) _vignette = profile.AddSettings<Vignette>();
                 else profile.TryGetSettings<Vignette>(out _vignette);
 
-                Debug.Log("[PPE Ext] All PPSv2 effects ensured in profile");
+                _log.LogInfo("[PPE Ext] All PPSv2 effects ensured in profile");
             }
             catch (Exception e)
             {
-                Debug.LogWarning("[PPE Ext] EnsureAllEffects failed: " + e.Message);
+                _log.LogWarning("[PPE Ext] EnsureAllEffects failed: " + e.Message);
             }
         }
 
@@ -1165,6 +1403,136 @@ namespace PPE_Extended
             if (_vignette.color != null) _vignette.color.Override(new Color(VignetteColorR.Value, VignetteColorG.Value, VignetteColorB.Value, 1f));
         }
 
+        // Secondary curves are sampled with 0.5 = neutral: 1.0 doubles saturation (or +180 deg hue), 0 removes it.
+        static AnimationCurve BuildHueBandCurve(ConfigEntry<float>[] bands, float scale)
+        {
+            var c = new AnimationCurve();
+            for (int i = 0; i < HueBandCount; i++) c.AddKey(HueBandPos[i], Mathf.Clamp01(0.5f + bands[i].Value * scale));
+            c.AddKey(1f, Mathf.Clamp01(0.5f + bands[0].Value * scale)); // wraps Magenta back into Red
+            Flatten(c);
+            return c;
+        }
+
+        static AnimationCurve BuildThreePointCurve(float low, float mid, float high)
+        {
+            var c = new AnimationCurve();
+            c.AddKey(0f, Mathf.Clamp01(0.5f + low * 0.5f));
+            c.AddKey(0.5f, Mathf.Clamp01(0.5f + mid * 0.5f));
+            c.AddKey(1f, Mathf.Clamp01(0.5f + high * 0.5f));
+            Flatten(c);
+            return c;
+        }
+
+        // Flat tangents: smooth eased bumps between bands without overshoot.
+        static void Flatten(AnimationCurve c)
+        {
+            for (int i = 0; i < c.length; i++) { var k = c.keys[i]; k.inTangent = 0f; k.outTangent = 0f; c.MoveKey(i, k); }
+        }
+
+        void DrawColorGradingHint(object ppe)
+        {
+            var cg = _cgObj != null ? GMV(_cgObj, ppe) as ColorGrading : null;
+            if (cg == null || cg.enabled == null || cg.enabled.value) return;
+            GUILayout.Label("Color Grading is OFF in the original PPE, so nothing on the color tabs can show.", GUILayout.Width(320));
+            if (GUILayout.Button("Enable Color Grading in Original PPE", GUILayout.Height(24))) EnsureOriginalColorGrading(ppe);
+        }
+
+        // Turning on color overrides implies color grading; flip the original's switch so the tabs are not dead.
+        static void EnsureOriginalColorGrading(object ppe)
+        {
+            try
+            {
+                var cg = _cgObj != null && ppe != null ? GMV(_cgObj, ppe) as ColorGrading : null;
+                if (cg == null || cg.enabled == null || cg.enabled.value || _cgEnable == null) return;
+                SCV(_cgEnable, ppe, true); // the original re-runs Settings() on this config change
+                _log.LogInfo("[PPE Ext] Enabled Color Grading in the original PPE (required by the color tabs)");
+            }
+            catch (Exception e) { _log.LogWarning("[PPE Ext] Could not enable original Color Grading: " + e.Message); }
+        }
+
+        // Seeds our effect values from what the original PPE currently renders, so taking
+        // ownership does not change the picture until the user moves something.
+        static void CopyEffectsFromOriginal()
+        {
+            var cfg = _instance.Config;
+            bool prev = cfg.SaveOnConfigSet;
+            cfg.SaveOnConfigSet = false;
+            try
+            {
+                if (_bloom != null)
+                {
+                    BloomEnable.Value = _bloom.enabled.value; BloomIntensity.Value = _bloom.intensity.value; BloomThreshold.Value = _bloom.threshold.value;
+                    BloomSoftKnee.Value = _bloom.softKnee.value; BloomClamp.Value = _bloom.clamp.value; BloomDiffusion.Value = _bloom.diffusion.value;
+                    BloomAnamorphic.Value = _bloom.anamorphicRatio.value; BloomFastMode.Value = _bloom.fastMode.value; BloomDirtIntensity.Value = _bloom.dirtIntensity.value;
+                    var bc = _bloom.color.value; BloomColorR.Value = bc.r; BloomColorG.Value = bc.g; BloomColorB.Value = bc.b;
+                }
+                if (_dof != null)
+                {
+                    DoFEnable.Value = _dof.enabled.value; DoFFocusDistance.Value = _dof.focusDistance.value; DoFAperture.Value = _dof.aperture.value;
+                    DoFFocalLength.Value = _dof.focalLength.value; DoFMaxBlur.Value = (int)_dof.kernelSize.value;
+                }
+                if (_grain != null)
+                {
+                    GrainEnable.Value = _grain.enabled.value; GrainIntensity.Value = _grain.intensity.value; GrainColored.Value = _grain.colored.value;
+                    GrainSize.Value = _grain.size.value; GrainLumContrib.Value = _grain.lumContrib.value;
+                }
+                if (_lensDistortion != null)
+                {
+                    LDEnable.Value = _lensDistortion.enabled.value; LDIntensity.Value = _lensDistortion.intensity.value;
+                    LDCenterX.Value = _lensDistortion.centerX.value; LDCenterY.Value = _lensDistortion.centerY.value; LDScale.Value = _lensDistortion.scale.value;
+                }
+                if (_chromaticAberration != null)
+                {
+                    CAEnable.Value = _chromaticAberration.enabled.value; CAIntensity.Value = _chromaticAberration.intensity.value; CAFastMode.Value = _chromaticAberration.fastMode.value;
+                }
+                if (_motionBlur != null)
+                {
+                    MBEnable.Value = _motionBlur.enabled.value; MBShutterAngle.Value = _motionBlur.shutterAngle.value; MBSampleCount.Value = _motionBlur.sampleCount.value;
+                }
+                if (_vignette != null)
+                {
+                    VignetteEnable.Value = _vignette.enabled.value; VignetteMode.Value = (int)_vignette.mode.value; VignetteIntensity.Value = _vignette.intensity.value;
+                    VignetteSmoothness.Value = _vignette.smoothness.value; VignetteRoundness.Value = _vignette.roundness.value;
+                    VignetteCenterX.Value = _vignette.center.value.x; VignetteCenterY.Value = _vignette.center.value.y;
+                    VignetteRounded.Value = _vignette.rounded.value; VignetteOpacity.Value = _vignette.opacity.value;
+                    var vc = _vignette.color.value; VignetteColorR.Value = vc.r; VignetteColorG.Value = vc.g; VignetteColorB.Value = vc.b;
+                }
+                _log.LogInfo("[PPE Ext] Copied current effect values from the original PPE");
+            }
+            catch (Exception e) { _log.LogWarning("[PPE Ext] Copy from original failed: " + e.Message); }
+            finally { cfg.SaveOnConfigSet = prev; if (prev) cfg.Save(); }
+        }
+
+        static void CopyCameraFromOriginal()
+        {
+            var cfg = _instance.Config;
+            bool prev = cfg.SaveOnConfigSet;
+            cfg.SaveOnConfigSet = false;
+            try
+            {
+                if (_boundLayer != null)
+                {
+                    AAMode.Value = (int)_boundLayer.antialiasingMode;
+                    SMAAQuality.Value = (int)_boundLayer.subpixelMorphologicalAntialiasing.quality;
+                    FXAAFastMode.Value = _boundLayer.fastApproximateAntialiasing.fastMode;
+                    FXAAKeepAlpha.Value = _boundLayer.fastApproximateAntialiasing.keepAlpha;
+                    TAAJitterSpread.Value = _boundLayer.temporalAntialiasing.jitterSpread;
+                    TAASharpness.Value = _boundLayer.temporalAntialiasing.sharpness;
+                    TAAStationaryBlending.Value = _boundLayer.temporalAntialiasing.stationaryBlending;
+                    TAAMotionBlending.Value = _boundLayer.temporalAntialiasing.motionBlending;
+                }
+                FogEnable.Value = RenderSettings.fog;
+                FogModeSelected.Value = RenderSettings.fogMode;
+                FogDensity.Value = RenderSettings.fogDensity;
+                FogStart.Value = RenderSettings.fogStartDistance;
+                FogEnd.Value = RenderSettings.fogEndDistance;
+                var fc = RenderSettings.fogColor; FogColorR.Value = fc.r; FogColorG.Value = fc.g; FogColorB.Value = fc.b;
+                _log.LogInfo("[PPE Ext] Copied current AA/Fog values from the original PPE");
+            }
+            catch (Exception e) { _log.LogWarning("[PPE Ext] Copy camera values failed: " + e.Message); }
+            finally { cfg.SaveOnConfigSet = prev; if (prev) cfg.Save(); }
+        }
+
         static AnimationCurve BuildMaster(int preset, float str, float bl, float wc)
         {
             var c = new AnimationCurve();
@@ -1195,14 +1563,30 @@ namespace PPE_Extended
         static void SV4(MemberInfo m, object o, Vector4 v) { SCV(m,o,v); }
         static Vector4 V4(float x,float y,float z,float w)=>new Vector4(x,y,z,w);
 
+        static string StatusLine(object ppe)
+        {
+            try
+            {
+                var on = _onoff != null ? GCV(_onoff, ppe) as bool? : null;
+                var sb = new StringBuilder();
+                sb.Append("Original PPE: ").Append(on == null ? "?" : (on.Value ? "ON" : "OFF (its master hotkey: Keypad /)"));
+                sb.Append(" | Bound: ").Append(_boundVolume != null ? "yes" : "no");
+                var cg = _cgObj != null ? GMV(_cgObj, ppe) as ColorGrading : null;
+                if (cg != null && cg.enabled != null)
+                    sb.Append(" | ColorGrading: ").Append(cg.enabled.value ? "ON " : "OFF ").Append(cg.gradingMode.value).Append('/').Append(cg.tonemapper.value);
+                return sb.ToString();
+            }
+            catch (Exception e) { return "Status unavailable: " + e.Message; }
+        }
+
         static void Section(string t, string d) { GUILayout.Space(5); GUILayout.Label(t, GUILayout.Width(320)); GUILayout.Label(d, GUILayout.Width(320)); GUILayout.Space(2); }
         static void SubSection(string t) { GUILayout.Space(3); GUILayout.Label("── " + t + " ──", GUILayout.Width(320)); }
         static void Slider(string label, float min, float max, ConfigEntry<float> cfg)
         {
             GUILayout.BeginHorizontal();
             GUILayout.Label(label, GUILayout.Width(140));
-            cfg.Value = GUILayout.HorizontalSlider(cfg.Value, min, max, GUILayout.Width(120));
-            GUILayout.Label(cfg.Value.ToString("F2"), GUILayout.Width(40));
+            cfg.Value = GUILayout.HorizontalSlider(cfg.Value, min, max, GUILayout.Width(100));
+            cfg.Value = FloatField(cfg.Definition.Section + "." + cfg.Definition.Key, cfg.Value, min, max, GUILayout.Width(50));
             GUILayout.EndHorizontal();
         }
         static void OneBtn(string label, System.Action a) { if (GUILayout.Button(label, GUILayout.Height(25))) a(); }
@@ -1218,16 +1602,213 @@ namespace PPE_Extended
             GUILayout.Label(name, GUILayout.Width(320));
             var v=GV4(m,o);
             GUILayout.BeginHorizontal();
-            GUILayout.Label("R:",GUILayout.Width(20)); v.x=GUILayout.HorizontalSlider(v.x,0,2,GUILayout.Width(95)); GUILayout.Label(v.x.ToString("F2"),GUILayout.Width(35));
-            GUILayout.Label("G:",GUILayout.Width(20)); v.y=GUILayout.HorizontalSlider(v.y,0,2,GUILayout.Width(95)); GUILayout.Label(v.y.ToString("F2"),GUILayout.Width(35));
+            GUILayout.Label("R:",GUILayout.Width(20)); v.x=GUILayout.HorizontalSlider(v.x,0,5,GUILayout.Width(80)); v.x=FloatField(name+".r",v.x,0,5,GUILayout.Width(50));
+            GUILayout.Label("G:",GUILayout.Width(20)); v.y=GUILayout.HorizontalSlider(v.y,0,5,GUILayout.Width(80)); v.y=FloatField(name+".g",v.y,0,5,GUILayout.Width(50));
             GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal();
-            GUILayout.Label("B:",GUILayout.Width(20)); v.z=GUILayout.HorizontalSlider(v.z,0,2,GUILayout.Width(95)); GUILayout.Label(v.z.ToString("F2"),GUILayout.Width(35));
-            GUILayout.Label("W:",GUILayout.Width(20)); v.w=GUILayout.HorizontalSlider(v.w,-0.5f,0.5f,GUILayout.Width(95)); GUILayout.Label(v.w.ToString("F2"),GUILayout.Width(35));
+            GUILayout.Label("B:",GUILayout.Width(20)); v.z=GUILayout.HorizontalSlider(v.z,0,5,GUILayout.Width(80)); v.z=FloatField(name+".b",v.z,0,5,GUILayout.Width(50));
+            GUILayout.Label("W:",GUILayout.Width(20)); v.w=GUILayout.HorizontalSlider(v.w,-2f,2f,GUILayout.Width(80)); v.w=FloatField(name+".w",v.w,-2f,2f,GUILayout.Width(50));
             GUILayout.EndHorizontal();
             SV4(m,o,v);
         }
 
-        private void OnDestroy() { _harmony?.UnpatchSelf(); }
+        // Focus-aware numeric field. While the field has keyboard focus the raw text being
+        // typed is shown (re-formatting it every frame made typing impossible); the value is
+        // committed live whenever the text parses and snaps back to F2 when focus leaves.
+        static string _editKey, _editBuf;
+        static float FloatField(string key, float val, float min, float max, params GUILayoutOption[] opts)
+        {
+            GUI.SetNextControlName(key);
+            bool focused = GUI.GetNameOfFocusedControl() == key;
+            string shown = (focused && _editKey == key) ? _editBuf : val.ToString("F2", CultureInfo.InvariantCulture);
+            string typed = GUILayout.TextField(shown, opts);
+            if (!focused)
+            {
+                if (_editKey == key) _editKey = null;
+                return val;
+            }
+            if (_editKey != key) { _editKey = key; _editBuf = shown; }
+            _editBuf = typed;
+            var ev = Event.current;
+            if (ev.type == EventType.KeyDown && (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter || ev.keyCode == KeyCode.Escape))
+            {
+                GUI.FocusControl(null);
+                _editKey = null;
+            }
+            float f;
+            if (float.TryParse(typed, NumberStyles.Float, CultureInfo.InvariantCulture, out f))
+                return Mathf.Clamp(f, min, max);
+            return val;
+        }
+
+        // === Presets & Studio scene persistence ===
+        static string PresetFolder { get { return Path.Combine(Paths.PluginPath, PresetFolderName); } }
+
+        // Everything except the UI section (panel scale / hotkey) is part of a "look".
+        static bool IsPersisted(ConfigDefinition def) { return def.Section != "UI"; }
+
+        // "[Section]" + "Key = value" lines, same shape as the BepInEx cfg so presets stay human-editable.
+        static string SerializeConfig()
+        {
+            var entries = new List<ConfigEntryBase>();
+            foreach (var kv in _instance.Config) if (IsPersisted(kv.Key)) entries.Add(kv.Value);
+            entries.Sort((a, b) =>
+            {
+                int c = string.CompareOrdinal(a.Definition.Section, b.Definition.Section);
+                return c != 0 ? c : string.CompareOrdinal(a.Definition.Key, b.Definition.Key);
+            });
+            var sb = new StringBuilder();
+            sb.Append("# PPE Extended preset v").Append(Version).Append('\n');
+            string section = null;
+            foreach (var e in entries)
+            {
+                if (e.Definition.Section != section)
+                {
+                    section = e.Definition.Section;
+                    sb.Append('\n').Append('[').Append(section).Append("]\n");
+                }
+                sb.Append(e.Definition.Key).Append(" = ").Append(e.GetSerializedValue()).Append('\n');
+            }
+            return sb.ToString();
+        }
+
+        // Unknown keys are ignored; values BepInEx rejects are logged and skipped.
+        static int ApplySerializedConfig(string text)
+        {
+            if (string.IsNullOrEmpty(text) || _entriesByKey == null) return 0;
+            int applied = 0;
+            string section = "";
+            foreach (var raw in text.Split('\n'))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line[0] == '#') continue;
+                if (line[0] == '[' && line[line.Length - 1] == ']') { section = line.Substring(1, line.Length - 2).Trim(); continue; }
+                int eq = line.IndexOf('=');
+                if (eq <= 0) continue;
+                var key = line.Substring(0, eq).Trim();
+                var value = line.Substring(eq + 1).Trim();
+                ConfigEntryBase entry;
+                if (!_entriesByKey.TryGetValue(section + "." + key, out entry) || !IsPersisted(entry.Definition)) continue;
+                try { entry.SetSerializedValue(value); applied++; }
+                catch (Exception e) { _log.LogWarning("[PPE Ext] Rejected " + section + "." + key + " = " + value + ": " + e.Message); }
+            }
+            _curvesDirty = true;
+            return applied;
+        }
+
+        static void RefreshPresetList()
+        {
+            try
+            {
+                if (!Directory.Exists(PresetFolder)) Directory.CreateDirectory(PresetFolder);
+                _presetFiles = Directory.GetFiles(PresetFolder, "*.cfg");
+                Array.Sort(_presetFiles, StringComparer.OrdinalIgnoreCase);
+            }
+            catch (Exception e) { _presetFiles = new string[0]; _presetStatus = "List failed: " + e.Message; }
+            _presetListLoaded = true;
+        }
+
+        static void SavePreset(string name)
+        {
+            try
+            {
+                foreach (var c in Path.GetInvalidFileNameChars()) name = name.Replace(c, '_');
+                name = name.Trim();
+                if (name.Length == 0) { _presetStatus = "Enter a preset name first"; return; }
+                if (!Directory.Exists(PresetFolder)) Directory.CreateDirectory(PresetFolder);
+                File.WriteAllText(Path.Combine(PresetFolder, name + ".cfg"), SerializeConfig());
+                _presetName = name;
+                _presetStatus = "Saved " + name;
+                RefreshPresetList();
+            }
+            catch (Exception e) { _presetStatus = "Save failed: " + e.Message; _log.LogWarning("[PPE Ext] " + _presetStatus); }
+        }
+
+        static void LoadPreset(string path)
+        {
+            try
+            {
+                int n = ApplySerializedConfig(File.ReadAllText(path));
+                _presetName = Path.GetFileNameWithoutExtension(path);
+                _presetStatus = "Loaded " + _presetName + " (" + n + " values)";
+            }
+            catch (Exception e) { _presetStatus = "Load failed: " + e.Message; _log.LogWarning("[PPE Ext] " + _presetStatus); }
+        }
+
+        static void DeletePreset(string path)
+        {
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+                _presetStatus = "Deleted " + Path.GetFileNameWithoutExtension(path);
+                RefreshPresetList();
+            }
+            catch (Exception e) { _presetStatus = "Delete failed: " + e.Message; _log.LogWarning("[PPE Ext] " + _presetStatus); }
+        }
+
+        void DrawPresets()
+        {
+            Section("Presets", "Extension settings only (all tabs + master switches). Original PPE presets are separate.");
+            if (!_presetListLoaded) RefreshPresetList();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Name:", GUILayout.Width(45));
+            _presetName = GUILayout.TextField(_presetName, GUILayout.Width(170));
+            if (GUILayout.Button("Save", GUILayout.Width(55))) SavePreset(_presetName);
+            if (GUILayout.Button("Refresh", GUILayout.Width(65))) RefreshPresetList();
+            GUILayout.EndHorizontal();
+            GUILayout.Label("Folder: BepInEx/plugins/" + PresetFolderName, GUILayout.Width(320));
+            GUILayout.Label("These settings are also stored in Studio scene files and restored on load.", GUILayout.Width(320));
+            if (!string.IsNullOrEmpty(_presetStatus)) GUILayout.Label(_presetStatus, GUILayout.Width(320));
+            GUILayout.Space(4);
+            foreach (var path in _presetFiles)
+            {
+                var name = Path.GetFileNameWithoutExtension(path);
+                GUILayout.BeginHorizontal();
+                if (GUILayout.Button(name, GUILayout.Width(190))) LoadPreset(path);
+                if (_presetPendingDelete == path)
+                {
+                    if (GUILayout.Button("Confirm", GUILayout.Width(65))) { DeletePreset(path); _presetPendingDelete = null; }
+                    if (GUILayout.Button("Cancel", GUILayout.Width(60))) _presetPendingDelete = null;
+                }
+                else if (GUILayout.Button("Delete", GUILayout.Width(65))) _presetPendingDelete = path;
+                GUILayout.EndHorizontal();
+            }
+        }
+
+        internal sealed class PpeExtSceneController : KKAPI.Studio.SaveLoad.SceneCustomFunctionController
+        {
+            protected override void OnSceneSave()
+            {
+                try
+                {
+                    var data = new PluginData();
+                    data.version = 1;
+                    data.data[SceneDataKey] = SerializeConfig();
+                    SetExtendedData(data);
+                }
+                catch (Exception e) { _log.LogWarning("[PPE Ext] Scene save failed: " + e.Message); }
+            }
+
+            // Same policy as Save_PostProcessingEffects: apply on Load and Import, never on Clear (new scene).
+            protected override void OnSceneLoad(KKAPI.Studio.SaveLoad.SceneOperationKind operation, KKAPI.Utilities.ReadOnlyDictionary<int, global::Studio.ObjectCtrlInfo> loadedItems)
+            {
+                if (operation == KKAPI.Studio.SaveLoad.SceneOperationKind.Clear) return;
+                try
+                {
+                    var data = GetExtendedData();
+                    object text;
+                    if (data == null || data.data == null || !data.data.TryGetValue(SceneDataKey, out text) || !(text is string)) return;
+                    int n = ApplySerializedConfig((string)text);
+                    _log.LogInfo("[PPE Ext] Scene " + operation + ": restored " + n + " extension values");
+                }
+                catch (Exception e) { _log.LogWarning("[PPE Ext] Scene load failed: " + e.Message); }
+            }
+        }
+
+        private void OnDestroy()
+        {
+            ReleaseSSRRenderingPath();
+            _harmony?.UnpatchSelf();
+        }
     }
 }
