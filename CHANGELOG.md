@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.1.1] - 2026-09-11
+
+### Fixed
+- SSR now applies independently of the global `EnableEffectOverrides` switch, so Bloom/DoF and other PPSv2 effects do not need to be taken over just to use SSR.
+- SSR depth and motion-vector requests remain active while the SSR setting is enabled.
+
 ## [2.1.0] - 2026-09-11
 
 ### Added

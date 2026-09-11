@@ -4,13 +4,14 @@ All issues encountered during development, their root causes, and fixes. This do
 
 ---
 
-## SSR on KKS (v2.1.0)
+## SSR on KKS (v2.1.1)
 
 PPSv2 Screen Space Reflections requires the camera's Deferred G-buffer and
 therefore reports unsupported on KKS's normal Forward path. Open the SSR tab,
 enable **Force Deferred path while SSR is enabled**, then initialize SSR while
 **Take Ownership of PPSv2 Effects** is enabled. The panel reports the active
-camera path and the log records the transition. Disabling the option or SSR
+camera path and the log records the transition. SSR no longer requires the
+global PPSv2 effect ownership switch. Disabling the option or SSR
 restores the previous camera path automatically.
 
 ---

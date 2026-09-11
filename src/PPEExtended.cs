@@ -20,7 +20,7 @@ namespace PPE_Extended
     public class PPEExtended : BaseUnityPlugin
     {
         public const string GUID = "com.user.ppe_extended";
-        public const string Version = "2.1.0";
+        public const string Version = "2.1.1";
         private const string PresetFolderName = "PPE_Extended_Presets";
         private const string SceneDataKey = "ppe_ext_cfg";
 
