@@ -601,6 +601,8 @@ namespace PPE_Extended
             var activePath = _boundCamera != null ? _boundCamera.actualRenderingPath : RenderingPath.UsePlayerSettings;
             if (_boundCamera != null)
                 GUILayout.Label("Camera path: " + activePath, GUILayout.Width(320));
+            if (!EnableEffectOverrides.Value)
+                GUILayout.Label("SSR has its own ownership; the global PPSv2 ownership switch is not required.", GUILayout.Width(320));
             bool forceDeferred = GUILayout.Toggle(SSRForceDeferred.Value, "  Force Deferred path while SSR is enabled");
             if (forceDeferred != SSRForceDeferred.Value)
             {
@@ -873,21 +875,22 @@ namespace PPE_Extended
                 {
                     EnsureAllEffects(vol.profile);
 
-                    // Keep depth texture on while SSR active (scene load may reset it)
-                    if (_ssrAvailable && _ssr != null && SSRenable.Value)
+                    // SSR is independent from the global effect ownership switch.
+                    // It must still be applied when Bloom/DoF/etc. remain under
+                    // the original PPE's control.
+                    if (_ssrAvailable && _ssr != null)
                     {
-                        var cam = Camera.main;
-                        if (cam != null && cam.depthTextureMode != DepthTextureMode.Depth)
-                            cam.depthTextureMode = DepthTextureMode.Depth;
+                        if (SSRenable.Value)
+                        {
+                            var cam = _boundCamera != null ? _boundCamera : Camera.main;
+                            if (cam != null)
+                                cam.depthTextureMode |= DepthTextureMode.Depth | DepthTextureMode.MotionVectors;
+                        }
+                        try { ApplySSR(); }
+                        catch (Exception e) { _log.LogWarning("[PPE Ext] SSR apply error: " + e.Message); _ssrAvailable = false; }
                     }
                     if (EnableEffectOverrides.Value)
                     {
-                        if (_ssrAvailable && _ssr != null)
-                        {
-                            try { ApplySSR(); }
-                            catch (Exception e) { _log.LogWarning("[PPE Ext] SSR apply error: " + e.Message); _ssrAvailable = false; }
-                        }
-
                         // Only write effect parameters in explicit ownership mode.
                         try { ApplyBloom(); } catch (Exception e) { _log.LogWarning("[PPE Ext] Bloom: " + e.Message); }
                         try { ApplyDoF(); } catch (Exception e) { _log.LogWarning("[PPE Ext] DoF: " + e.Message); }
