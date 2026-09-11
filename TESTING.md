@@ -41,4 +41,4 @@ Loaded without errors at the start screen; withdrawn because its per-frame relea
 | Motion Blur | Supported, animation dependent |
 | Fog / AA | Camera ownership required |
 | Auto Exposure | Experimental, disabled by default |
-| SSR | Requires Deferred; v2.1.1 provides an opt-in camera path switch and independent SSR ownership; use ReflectionProbe if Deferred is incompatible with a scene |
+| SSR | Requires Deferred; v2.1.2 blocks unsafe runtime path switching on KKS and keeps independent SSR ownership; use ReflectionProbe for the normal Forward renderer |

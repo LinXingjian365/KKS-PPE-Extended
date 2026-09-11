@@ -20,7 +20,7 @@ namespace PPE_Extended
     public class PPEExtended : BaseUnityPlugin
     {
         public const string GUID = "com.user.ppe_extended";
-        public const string Version = "2.1.1";
+        public const string Version = "2.1.2";
         private const string PresetFolderName = "PPE_Extended_Presets";
         private const string SceneDataKey = "ppe_ext_cfg";
 
@@ -54,6 +54,10 @@ namespace PPE_Extended
         private static Camera _ssrPathCamera;
         private static RenderingPath _ssrOriginalPath;
         private static bool _ssrPathOverridden;
+        // KKS Studio's Forward-only material set is not safe to switch to
+        // Deferred at runtime; leave this hard-disabled until a full GBuffer
+        // compatibility pass exists.
+        private const bool AllowUnsafeDeferredSSR = false;
         private static float _nextDiagnosticTime;
         private static bool _postfixSeen;
         private static bool _tickSeen;
@@ -231,6 +235,11 @@ namespace PPE_Extended
 
             SSRenable = CfgB("SSR", "Enable", false);
             SSRForceDeferred = CfgB("SSR", "ForceDeferredForSSR", false);
+            if (SSRForceDeferred.Value && !AllowUnsafeDeferredSSR)
+            {
+                SSRForceDeferred.Value = false;
+                Logger.LogWarning("[PPE Ext] ForceDeferredForSSR was reset to false: KKS runtime is Forward-only and switching to Deferred can crash the renderer.");
+            }
             SSRpreset = Config.Bind("SSR", "Preset", 2, "0=Lower 1=Low 2=Medium 3=High 4=Higher 5=Ultra 6=Overkill 7=Custom");
             SSRthickness = CfgR("SSR", "Thickness", 8f, 1f, 64f);
             SSRmaxDist = CfgR("SSR", "MaxMarchDistance", 50f, 1f, 200f);
@@ -603,14 +612,8 @@ namespace PPE_Extended
                 GUILayout.Label("Camera path: " + activePath, GUILayout.Width(320));
             if (!EnableEffectOverrides.Value)
                 GUILayout.Label("SSR has its own ownership; the global PPSv2 ownership switch is not required.", GUILayout.Width(320));
-            bool forceDeferred = GUILayout.Toggle(SSRForceDeferred.Value, "  Force Deferred path while SSR is enabled");
-            if (forceDeferred != SSRForceDeferred.Value)
-            {
-                SSRForceDeferred.Value = forceDeferred;
-                if (!forceDeferred) ReleaseSSRRenderingPath();
-            }
-            if (activePath != RenderingPath.DeferredShading && !SSRForceDeferred.Value)
-                GUILayout.Label("SSR is unavailable in Forward mode. Enable the option above to test Deferred.", GUILayout.Width(320));
+            if (activePath != RenderingPath.DeferredShading)
+                GUILayout.Label("SSR is unavailable in KKS Forward mode; Deferred switching is blocked for renderer safety. Use ReflectionProbe for reflections.", GUILayout.Width(320));
             if (!_ssrAvailable)
             {
                 GUILayout.Label("Not initialized, click button below (first time only)", GUILayout.Width(320));
@@ -1040,17 +1043,9 @@ namespace PPE_Extended
                 if (cam == null) return false;
                 if (cam.actualRenderingPath != RenderingPath.DeferredShading)
                 {
-                    if (!SSRForceDeferred.Value)
-                    {
-                        _log.LogWarning("[PPE Ext] SSR unavailable: camera rendering path is " + cam.actualRenderingPath + "; enable ForceDeferredForSSR to opt in.");
-                        return false;
-                    }
-                    EnsureSSRRenderingPath(cam);
-                    if (cam.actualRenderingPath != RenderingPath.DeferredShading)
-                    {
-                        _log.LogWarning("[PPE Ext] SSR force-deferred request was not accepted; actual path remains " + cam.actualRenderingPath + ".");
-                        return false;
-                    }
+                    _log.LogWarning("[PPE Ext] SSR unavailable: camera rendering path is " + cam.actualRenderingPath + "; runtime Deferred switching is blocked for KKS safety.");
+                    SSRForceDeferred.Value = false;
+                    return false;
                 }
 
                 // Key fix: SSR needs depth texture, PPE does not enable it by default
@@ -1098,7 +1093,7 @@ namespace PPE_Extended
         {
             if (_ssr.enabled == null) return;
             var cam = _boundCamera != null ? _boundCamera : Camera.main;
-            if (SSRenable.Value && SSRForceDeferred.Value && cam != null)
+            if (SSRenable.Value && SSRForceDeferred.Value && AllowUnsafeDeferredSSR && cam != null)
                 EnsureSSRRenderingPath(cam);
             _ssr.enabled.Override(SSRenable.Value);
             if (!SSRenable.Value)

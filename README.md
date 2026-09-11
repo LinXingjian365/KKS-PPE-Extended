@@ -66,7 +66,7 @@ Extends the original KKS PostProcessingEffects plugin with a standalone floating
 2. Press **Ctrl+P** to open the extended panel.
 3. For Curves/Mixer/CustomTone: tick **"Enable Color Overrides"** at the top of the panel.
 4. To let this extension control Bloom/DoF/Grain/Lens/CA/Blur/Vignette/SSR, explicitly enable **"Take Ownership of PPSv2 Effects"** first. Otherwise their original PPE values are preserved.
-   For SSR, enable **"Force Deferred path while SSR is enabled"** in the SSR tab; KKS normally runs Forward and PPSv2 SSR cannot execute there.
+   PPSv2 SSR requires Deferred GBuffer data; KKS runs Forward and the extension blocks runtime path switching for safety. Use `KKS_ReflectionProbe.dll` for reflections in the normal KKS renderer.
 5. To let this extension control FXAA/SMAA/TAA/Fog, explicitly enable **"Take Ownership of Camera AA/Fog"** first.
 6. Adjust sliders or type into the number boxes — changes apply in real-time.
 7. Turn a master switch off (or press **Return Control to Original PPE**) to give the original plugin its values back immediately.

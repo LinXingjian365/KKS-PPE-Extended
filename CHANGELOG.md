@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.2] - 2026-09-11
+
+### Fixed
+- Disabled runtime Forward-to-Deferred switching on KKS. The renderer's Forward-only material set can crash when a Deferred SSR frame is submitted.
+- Automatically resets legacy `ForceDeferredForSSR=true` configurations to `false` at startup.
+- SSR now fails safely with an explanatory warning in Forward mode; the existing ReflectionProbe route remains the supported reflection fallback.
+
 ## [2.1.1] - 2026-09-11
 
 ### Fixed
